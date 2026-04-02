@@ -1,7 +1,7 @@
 #include "globals.hpp"
 #include "HotEdge.hpp"
 
-#include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
@@ -37,32 +37,33 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     // Register event callbacks using lambda style (like official plugins)
     // Use mouseMove for responsive edge detection
-    static auto mouseMoveCb = HyprlandAPI::registerCallbackDynamic(
-        PHANDLE, "mouseMove", [](void* self, SCallbackInfo& info, std::any data) {
+    // mouseMove -> m_events.input.mouse.move (Cancellable<Vector2D>)
+    static auto mouseMoveCb = Event::bus()->m_events.input.mouse.move.listen(
+        [](const Vector2D&, Event::SCallbackInfo&) {
             if (g_pHotEdge)
                 g_pHotEdge->onTick();
         }
     );
 
-    // Also use preRender as backup - fires every frame even when cursor is stuck at edge
-    static auto preRenderCb = HyprlandAPI::registerCallbackDynamic(
-        PHANDLE, "preRender", [](void* self, SCallbackInfo& info, std::any data) {
+    // preRender -> m_events.render.pre (Event<PHLMONITOR>)
+    static auto preRenderCb = Event::bus()->m_events.render.pre.listen(
+        [](const PHLMONITOR&) {
             if (g_pHotEdge)
                 g_pHotEdge->onTick();
         }
     );
 
-    static auto activeWindowCb = HyprlandAPI::registerCallbackDynamic(
-        PHANDLE, "activeWindow", [](void* self, SCallbackInfo& info, std::any data) {
-            if (g_pHotEdge) {
-                auto pWindow = std::any_cast<PHLWINDOW>(data);
+    // activeWindow -> m_events.window.active (Event<PHLWINDOW, Desktop::eFocusReason>)
+    static auto activeWindowCb = Event::bus()->m_events.window.active.listen(
+        [](const PHLWINDOW& pWindow, Desktop::eFocusReason) {
+            if (g_pHotEdge)
                 g_pHotEdge->onActiveWindowChange(pWindow);
-            }
         }
     );
 
-    static auto configReloadedCb = HyprlandAPI::registerCallbackDynamic(
-        PHANDLE, "configReloaded", [](void* self, SCallbackInfo& info, std::any data) {
+    // configReloaded -> m_events.config.reloaded (Event<>)
+    static auto configReloadedCb = Event::bus()->m_events.config.reloaded.listen(
+        []() {
             if (g_pHotEdge)
                 g_pHotEdge->reloadConfig();
         }
