@@ -401,8 +401,11 @@ void CHotEdge::showOverlay(int slotIndex) {
 
     // Use the dispatcher to toggle the special workspace
     auto it = g_pKeybindManager->m_dispatchers.find("togglespecialworkspace");
-    if (it != g_pKeybindManager->m_dispatchers.end())
+    if (it != g_pKeybindManager->m_dispatchers.end()) {
         it->second(m_edges[slotIndex].specialWorkspace);
+    } else {
+        Log::logger->log(Log::ERR, "[HotEdge] togglespecialworkspace dispatcher not found");
+    }
 }
 
 void CHotEdge::hideOverlay(int slotIndex) {
