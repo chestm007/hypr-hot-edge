@@ -45,13 +45,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         }
     );
 
-    // preRender -> m_events.render.pre (Event<PHLMONITOR>)
-    static auto preRenderCb = Event::bus()->m_events.render.pre.listen(
-        [](const PHLMONITOR&) {
-            if (g_pHotEdge)
-                g_pHotEdge->onTick();
-        }
-    );
+    // Note: previously listened on render.pre as well, but calling dispatchers
+    // (togglespecialworkspace) from inside render preparation races with
+    // screencopy frame teardown and crashes Hyprland in surface scale walks.
+    // mouse.move alone is enough for edge detection.
 
     // activeWindow -> m_events.window.active (Event<PHLWINDOW, Desktop::eFocusReason>)
     static auto activeWindowCb = Event::bus()->m_events.window.active.listen(

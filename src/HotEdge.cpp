@@ -3,6 +3,7 @@
 
 #include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprutils/math/Box.hpp>
 
 using namespace std::chrono;
@@ -221,6 +222,13 @@ bool CHotEdge::isCursorAtScreenEdge(int slotIndex, PHLMONITOR monitor) {
 }
 
 void CHotEdge::onTick() {
+    // Throttle to ~60Hz; mouse.move fires per-pixel.
+    static auto lastTick = steady_clock::time_point{};
+    const auto now = steady_clock::now();
+    if (duration_cast<milliseconds>(now - lastTick).count() < 16)
+        return;
+    lastTick = now;
+
     for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
         if (m_edges[i].enabled)
             processEdge(i);
@@ -399,13 +407,17 @@ void CHotEdge::showOverlay(int slotIndex) {
     m_states[slotIndex].bJustShown = true;
     m_states[slotIndex].showTime = steady_clock::now();
 
-    // Use the dispatcher to toggle the special workspace
-    auto it = g_pKeybindManager->m_dispatchers.find("togglespecialworkspace");
-    if (it != g_pKeybindManager->m_dispatchers.end()) {
-        it->second(m_edges[slotIndex].specialWorkspace);
-    } else {
-        Log::logger->log(Log::ERR, "[HotEdge] togglespecialworkspace dispatcher not found");
-    }
+    // Defer to idle: calling togglespecialworkspace synchronously from signal
+    // listeners (render.pre, window.active, mouse.move) can race with screencopy
+    // frame teardown and crash in CWLSurfaceResource::sendPreferredScale.
+    const auto ws = m_edges[slotIndex].specialWorkspace;
+    g_pEventLoopManager->doLater([ws]() {
+        auto it = g_pKeybindManager->m_dispatchers.find("togglespecialworkspace");
+        if (it != g_pKeybindManager->m_dispatchers.end())
+            it->second(ws);
+        else
+            Log::logger->log(Log::ERR, "[HotEdge] togglespecialworkspace dispatcher not found");
+    });
 }
 
 void CHotEdge::hideOverlay(int slotIndex) {
@@ -418,10 +430,13 @@ void CHotEdge::hideOverlay(int slotIndex) {
     Log::logger->log(Log::DEBUG, "[HotEdge] Hiding overlay: {} (slot {})",
         m_edges[slotIndex].specialWorkspace, EDGE_SLOT_NAMES[slotIndex]);
 
-    // Toggle it off
-    auto it = g_pKeybindManager->m_dispatchers.find("togglespecialworkspace");
-    if (it != g_pKeybindManager->m_dispatchers.end())
-        it->second(m_edges[slotIndex].specialWorkspace);
+    // Defer to idle (see showOverlay for rationale).
+    const auto ws = m_edges[slotIndex].specialWorkspace;
+    g_pEventLoopManager->doLater([ws]() {
+        auto it = g_pKeybindManager->m_dispatchers.find("togglespecialworkspace");
+        if (it != g_pKeybindManager->m_dispatchers.end())
+            it->second(ws);
+    });
 }
 
 int CHotEdge::parseEdgeArg(const std::string& arg) {
