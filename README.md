@@ -143,7 +143,7 @@ decoration {
 
 ## Dispatchers
 
-The plugin provides three dispatchers that can be used with keybindings:
+The plugin provides dispatchers for both per-panel control and a global on/off switch for cursor-driven edge detection:
 
 ```conf
 # Toggle by side name (recommended - auto-selects slot for current monitor)
@@ -159,6 +159,9 @@ bind = SUPER CTRL, 2, hotedge:toggle, edge2
 # Show/hide specific edges
 bind = SUPER CTRL, S, hotedge:show, right
 bind = SUPER CTRL, X, hotedge:hide, right
+
+# Pause/resume cursor-driven edge detection globally
+bind = SUPER CTRL, P, hotedge:toggle-active
 ```
 
 ### Dispatcher Arguments
@@ -169,6 +172,23 @@ bind = SUPER CTRL, X, hotedge:hide, right
 | `edge1` - `edge8` | Toggle specific slot |
 | `1` - `8` | Toggle slot by number |
 | *(empty)* | Toggle first visible or first enabled slot |
+
+### Runtime Activation
+
+The `hotedge:enable`, `hotedge:disable`, and `hotedge:toggle-active` dispatchers gate **only cursor-driven automation** — useful when you want to temporarily stop edges from triggering on mouse movement (e.g. while gaming, drawing, or doing precise edge work) without losing your panel layout.
+
+| Dispatcher | Effect |
+|------------|--------|
+| `hotedge:enable` | Resume cursor-edge detection and focus-loss auto-hide |
+| `hotedge:disable` | Pause cursor-edge detection and focus-loss auto-hide |
+| `hotedge:toggle-active` | Flip the current state |
+
+What disable does **not** touch:
+- **Visible panels stay visible.** Open them with the cursor first, then disable, and they remain until you hide them.
+- **Windows inside the special workspaces are untouched.** They're owned by Hyprland, not the plugin.
+- **Explicit dispatchers still work.** `hotedge:toggle`, `hotedge:show`, and `hotedge:hide` always honor user intent regardless of active state. You can also still toggle the workspaces directly via `hyprctl dispatch togglespecialworkspace <name>`.
+
+State is runtime-only (resets to enabled on plugin load / Hyprland restart).
 
 ## Multi-Monitor Setup
 

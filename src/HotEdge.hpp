@@ -4,6 +4,7 @@
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
+#include <hyprland/src/helpers/signal/Signal.hpp>
 
 #include <string>
 #include <chrono>
@@ -51,6 +52,7 @@ public:
     ~CHotEdge();
 
     void init();
+    void registerCallbacks();
     void onTick();
     void onActiveWindowChange(PHLWINDOW pWindow);
 
@@ -58,6 +60,12 @@ public:
     static SDispatchResult dispatchToggle(std::string args);
     static SDispatchResult dispatchShow(std::string args);
     static SDispatchResult dispatchHide(std::string args);
+
+    // Runtime activation - gates cursor-driven automation only.
+    // Explicit dispatchers (toggle/show/hide) and existing visible panels are untouched.
+    static SDispatchResult dispatchEnable(std::string args);
+    static SDispatchResult dispatchDisable(std::string args);
+    static SDispatchResult dispatchToggleActive(std::string args);
 
     // Configuration
     void reloadConfig();
@@ -85,6 +93,15 @@ private:
 
     std::array<EdgeConfig, MAX_EDGE_SLOTS> m_edges;
     std::array<EdgeState, MAX_EDGE_SLOTS> m_states;
+
+    bool m_active = true;
+
+    // Event-bus listener handles. Stored as members so they unregister when
+    // CHotEdge is destroyed (in PLUGIN_EXIT) — replaces the previous static-local
+    // pattern that prevented clean plugin unload/reload.
+    CHyprSignalListener m_mouseMoveCb;
+    CHyprSignalListener m_activeWindowCb;
+    CHyprSignalListener m_configReloadedCb;
 };
 
 inline std::unique_ptr<CHotEdge> g_pHotEdge;

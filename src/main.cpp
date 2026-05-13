@@ -30,46 +30,28 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(PHANDLE, "hotedge:toggle", CHotEdge::dispatchToggle);
     HyprlandAPI::addDispatcherV2(PHANDLE, "hotedge:show", CHotEdge::dispatchShow);
     HyprlandAPI::addDispatcherV2(PHANDLE, "hotedge:hide", CHotEdge::dispatchHide);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "hotedge:enable", CHotEdge::dispatchEnable);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "hotedge:disable", CHotEdge::dispatchDisable);
+    HyprlandAPI::addDispatcherV2(PHANDLE, "hotedge:toggle-active", CHotEdge::dispatchToggleActive);
 
     // Create the HotEdge instance BEFORE registering callbacks
     g_pHotEdge = std::make_unique<CHotEdge>();
     g_pHotEdge->init();
 
-    // Register event callbacks using lambda style (like official plugins)
-    // Use mouseMove for responsive edge detection
-    // mouseMove -> m_events.input.mouse.move (Cancellable<Vector2D>)
-    static auto mouseMoveCb = Event::bus()->m_events.input.mouse.move.listen(
-        [](const Vector2D&, Event::SCallbackInfo&) {
-            if (g_pHotEdge)
-                g_pHotEdge->onTick();
-        }
-    );
-
+    // Register event listeners as members on g_pHotEdge so they unregister
+    // automatically in PLUGIN_EXIT when the instance is destroyed. This replaces
+    // the previous static-local pattern, which prevented clean plugin reload.
+    //
     // Note: previously listened on render.pre as well, but calling dispatchers
     // (togglespecialworkspace) from inside render preparation races with
     // screencopy frame teardown and crashes Hyprland in surface scale walks.
     // mouse.move alone is enough for edge detection.
-
-    // activeWindow -> m_events.window.active (Event<PHLWINDOW, Desktop::eFocusReason>)
-    static auto activeWindowCb = Event::bus()->m_events.window.active.listen(
-        [](const PHLWINDOW& pWindow, Desktop::eFocusReason) {
-            if (g_pHotEdge)
-                g_pHotEdge->onActiveWindowChange(pWindow);
-        }
-    );
-
-    // configReloaded -> m_events.config.reloaded (Event<>)
-    static auto configReloadedCb = Event::bus()->m_events.config.reloaded.listen(
-        []() {
-            if (g_pHotEdge)
-                g_pHotEdge->reloadConfig();
-        }
-    );
+    g_pHotEdge->registerCallbacks();
 
     Log::logger->log(Log::INFO, "[HotEdge] Registered callbacks");
     Log::logger->log(Log::INFO, "[HotEdge] Plugin loaded successfully!");
 
-    return {"hypr-hot-edge", "Hot edge trigger for special workspace overlays (supports multiple edges per monitor)", "claychinasky", "0.3.0"};
+    return {"hypr-hot-edge", "Hot edge trigger for special workspace overlays (supports multiple edges per monitor)", "claychinasky", "0.4.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

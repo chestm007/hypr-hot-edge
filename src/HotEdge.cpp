@@ -2,7 +2,9 @@
 #include "globals.hpp"
 
 #include <hyprland/src/config/ConfigManager.hpp>
+#include <hyprland/src/helpers/Monitor.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
+#include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprutils/math/Box.hpp>
 
@@ -27,6 +29,28 @@ void CHotEdge::init() {
                 m_edges[i].specialWorkspace, m_edges[i].targetMonitor);
         }
     }
+}
+
+void CHotEdge::registerCallbacks() {
+    // Listeners stored as members; they unregister automatically when this
+    // CHotEdge instance is destroyed in PLUGIN_EXIT, allowing clean plugin reload.
+    m_mouseMoveCb = Event::bus()->m_events.input.mouse.move.listen(
+        [](const Vector2D&, Event::SCallbackInfo&) {
+            if (g_pHotEdge)
+                g_pHotEdge->onTick();
+        });
+
+    m_activeWindowCb = Event::bus()->m_events.window.active.listen(
+        [](const PHLWINDOW& pWindow, Desktop::eFocusReason) {
+            if (g_pHotEdge)
+                g_pHotEdge->onActiveWindowChange(pWindow);
+        });
+
+    m_configReloadedCb = Event::bus()->m_events.config.reloaded.listen(
+        []() {
+            if (g_pHotEdge)
+                g_pHotEdge->reloadConfig();
+        });
 }
 
 EdgeSide CHotEdge::parseSide(const std::string& str) {
@@ -222,6 +246,9 @@ bool CHotEdge::isCursorAtScreenEdge(int slotIndex, PHLMONITOR monitor) {
 }
 
 void CHotEdge::onTick() {
+    if (!m_active)
+        return;
+
     // Throttle to ~60Hz; mouse.move fires per-pixel.
     static auto lastTick = steady_clock::time_point{};
     const auto now = steady_clock::now();
@@ -354,6 +381,9 @@ void CHotEdge::processEdge(int slotIndex) {
 }
 
 void CHotEdge::onActiveWindowChange(PHLWINDOW pWindow) {
+    if (!m_active)
+        return;
+
     // Check each enabled edge
     for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
         if (!m_edges[i].enabled)
@@ -567,4 +597,33 @@ SDispatchResult CHotEdge::dispatchHide(std::string args) {
         }
     }
     return {};
+}
+
+SDispatchResult CHotEdge::dispatchEnable(std::string) {
+    if (!g_pHotEdge)
+        return {.success = false, .error = "HotEdge not initialized"};
+    g_pHotEdge->m_active = true;
+    Log::logger->log(Log::INFO, "[HotEdge] Edge detection enabled");
+    return {};
+}
+
+SDispatchResult CHotEdge::dispatchDisable(std::string) {
+    if (!g_pHotEdge)
+        return {.success = false, .error = "HotEdge not initialized"};
+    g_pHotEdge->m_active = false;
+    // Reset transient cursor-tracking state so re-enable starts clean.
+    // Don't touch activeMonitorName or visible overlays — those remain recoverable.
+    for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
+        g_pHotEdge->m_states[i].bCursorInZone = false;
+        g_pHotEdge->m_states[i].bDwelling = false;
+        g_pHotEdge->m_states[i].bHideDelaying = false;
+    }
+    Log::logger->log(Log::INFO, "[HotEdge] Edge detection disabled");
+    return {};
+}
+
+SDispatchResult CHotEdge::dispatchToggleActive(std::string args) {
+    if (!g_pHotEdge)
+        return {.success = false, .error = "HotEdge not initialized"};
+    return g_pHotEdge->m_active ? dispatchDisable(args) : dispatchEnable(args);
 }
