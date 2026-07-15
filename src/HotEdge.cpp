@@ -51,6 +51,12 @@ void CHotEdge::registerCallbacks() {
             if (g_pHotEdge)
                 g_pHotEdge->reloadConfig();
         });
+
+    m_monitorRemovedCb = Event::bus()->m_events.monitor.preRemoved.listen(
+        [](const PHLMONITOR& pMonitor) {
+            if (g_pHotEdge)
+                g_pHotEdge->onMonitorRemoved(pMonitor);
+        });
 }
 
 EdgeSide CHotEdge::parseSide(const std::string& str) {
@@ -419,6 +425,28 @@ void CHotEdge::onActiveWindowChange(PHLWINDOW pWindow) {
             Log::logger->log(Log::DEBUG, "[HotEdge] Focus left special workspace {}, hiding overlay", EDGE_SLOT_NAMES[i]);
             hideOverlay(i);
             m_states[i].activeMonitorName.clear();
+        }
+    }
+}
+
+void CHotEdge::onMonitorRemoved(PHLMONITOR pMonitor) {
+    if (!pMonitor)
+        return;
+
+    // A monitor is being torn down (unplug / output disable / DPMS off). Hide any
+    // panel still open on it BEFORE Hyprland unmaps the live special-workspace
+    // window — that unmap path races with screencopy frame destruction and
+    // null-derefs in CWLSurfaceResource::sendPreferredScale (see showOverlay).
+    // processEdge only hides on cursor-monitor-change, which doesn't fire here.
+    for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
+        if (m_states[i].activeMonitorName == pMonitor->m_name) {
+            Log::logger->log(Log::DEBUG, "[HotEdge] Monitor {} removed, hiding {} overlay",
+                pMonitor->m_name, EDGE_SLOT_NAMES[i]);
+            hideOverlay(i);
+            m_states[i].activeMonitorName.clear();
+            m_states[i].bCursorInZone   = false;
+            m_states[i].bDwelling       = false;
+            m_states[i].bHideDelaying   = false;
         }
     }
 }

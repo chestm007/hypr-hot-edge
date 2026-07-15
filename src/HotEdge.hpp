@@ -55,6 +55,7 @@ public:
     void registerCallbacks();
     void onTick();
     void onActiveWindowChange(PHLWINDOW pWindow);
+    void onMonitorRemoved(PHLMONITOR pMonitor);
 
     // Dispatchers - args can be empty (all edges), edge slot ("edge1"), or side name ("right")
     static SDispatchResult dispatchToggle(std::string args);
@@ -102,6 +103,7 @@ private:
     CHyprSignalListener m_mouseMoveCb;
     CHyprSignalListener m_activeWindowCb;
     CHyprSignalListener m_configReloadedCb;
+    CHyprSignalListener m_monitorRemovedCb;
 };
 
 inline std::unique_ptr<CHotEdge> g_pHotEdge;
