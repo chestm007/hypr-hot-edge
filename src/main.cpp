@@ -13,18 +13,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     Log::logger->log(Log::INFO, "[HotEdge] Plugin loading...");
 
-    // Register configuration values for each edge slot (edge1-edge8)
-    for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
-        std::string prefix = std::string("plugin:hot-edge:") + EDGE_SLOT_NAMES[i] + ":";
-
-        HyprlandAPI::addConfigValue(PHANDLE, (prefix + "enabled").c_str(), Hyprlang::INT{0});
-        HyprlandAPI::addConfigValue(PHANDLE, (prefix + "side").c_str(), Hyprlang::STRING{"right"});
-        HyprlandAPI::addConfigValue(PHANDLE, (prefix + "trigger_width").c_str(), Hyprlang::INT{15});
-        HyprlandAPI::addConfigValue(PHANDLE, (prefix + "dwell_time").c_str(), Hyprlang::INT{150});
-        HyprlandAPI::addConfigValue(PHANDLE, (prefix + "special_workspace").c_str(), Hyprlang::STRING{""});
-        HyprlandAPI::addConfigValue(PHANDLE, (prefix + "target_monitor").c_str(), Hyprlang::STRING{"*"});
-    }
-
     // Register dispatchers
     // Args can be slot name (edge1, edge2, etc.) or empty for default behavior
     HyprlandAPI::addDispatcherV2(PHANDLE, "hotedge:toggle", CHotEdge::dispatchToggle);
@@ -36,6 +24,11 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     // Create the HotEdge instance BEFORE registering callbacks
     g_pHotEdge = std::make_unique<CHotEdge>();
+
+    // Config values must be registered inside pluginInit, and before init()
+    // reads them. They are owned by the plugin now (addConfigValueV2), replacing
+    // the deprecated addConfigValue/getConfigValue name-lookup pair.
+    g_pHotEdge->registerConfigValues();
     g_pHotEdge->init();
 
     // Register event listeners as members on g_pHotEdge so they unregister

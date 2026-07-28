@@ -5,6 +5,7 @@
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/helpers/signal/Signal.hpp>
+#include <hyprland/src/config/values/ConfigValues.hpp>
 
 #include <string>
 #include <chrono>
@@ -31,6 +32,19 @@ struct EdgeConfig {
     bool enabled = false;
 };
 
+// Handles returned by addConfigValueV2. Hyprland 0.56 deprecated the
+// name-lookup API (getConfigValue), which returns nullptr under the Lua config
+// manager — dereferencing that is what SIGSEGV'd the compositor. Holding the
+// value objects instead removes the lookup, so there is nothing to be null.
+struct EdgeConfigValues {
+    SP<Config::Values::Int>    enabled;
+    SP<Config::Values::String> side;
+    SP<Config::Values::Int>    triggerWidth;
+    SP<Config::Values::Int>    dwellTime;
+    SP<Config::Values::String> specialWorkspace;
+    SP<Config::Values::String> targetMonitor;
+};
+
 struct EdgeState {
     bool bCursorInZone = false;
     bool bDwelling = false;
@@ -52,6 +66,7 @@ public:
     ~CHotEdge();
 
     void init();
+    void registerConfigValues();   // must run inside pluginInit, before init()
     void registerCallbacks();
     void onTick();
     void onActiveWindowChange(PHLWINDOW pWindow);
@@ -94,6 +109,7 @@ private:
 
     std::array<EdgeConfig, MAX_EDGE_SLOTS> m_edges;
     std::array<EdgeState, MAX_EDGE_SLOTS> m_states;
+    std::array<EdgeConfigValues, MAX_EDGE_SLOTS> m_configValues;
 
     bool m_active = true;
 

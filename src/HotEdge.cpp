@@ -2,13 +2,20 @@
 #include "globals.hpp"
 
 #include <hyprland/src/config/ConfigManager.hpp>
-#include <hyprland/src/helpers/Monitor.hpp>
+#include <hyprland/src/output/Monitor.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprutils/math/Box.hpp>
 
 using namespace std::chrono;
+
+// Hyprland 0.56 removed CCompositor::getMonitorFromCursor() and CCompositor::m_monitors;
+// monitor lookup now goes through the State::monitorState() query builder.
+static PHLMONITOR monitorAtCursor() {
+    return State::monitorState()->query().vec(g_pInputManager->getMouseCoordsInternal()).run();
+}
 
 CHotEdge::CHotEdge() {
     Log::logger->log(Log::DEBUG, "[HotEdge] Initializing...");
@@ -75,30 +82,54 @@ EdgeSide CHotEdge::parseSide(const std::string& str) {
     return EdgeSide::RIGHT;  // Default
 }
 
+namespace {
+    // Config::Values::IValue stores its name as a bare const char*, it does not
+    // copy. These backing strings must therefore outlive the value objects, so
+    // they live at namespace scope in a fixed array (never reallocates, unlike a
+    // vector, whose SSO buffers would move and dangle the stored pointers).
+    constexpr int                                     FIELDS_PER_SLOT = 6;
+    std::array<std::string, MAX_EDGE_SLOTS * FIELDS_PER_SLOT> g_configNames;
+
+    const char* configName(int slot, int field, const char* suffix) {
+        auto& s = g_configNames[slot * FIELDS_PER_SLOT + field];
+        s       = std::string("plugin:hot-edge:") + EDGE_SLOT_NAMES[slot] + ":" + suffix;
+        return s.c_str();
+    }
+}
+
+void CHotEdge::registerConfigValues() {
+    for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
+        auto& v = m_configValues[i];
+
+        v.enabled          = makeShared<Config::Values::Int>(configName(i, 0, "enabled"), "Enable this hot edge", 0);
+        v.side             = makeShared<Config::Values::String>(configName(i, 1, "side"), "Screen edge: left, right, top or bottom", "right");
+        v.triggerWidth     = makeShared<Config::Values::Int>(configName(i, 2, "trigger_width"), "Width of the trigger zone, in px", 15);
+        v.dwellTime        = makeShared<Config::Values::Int>(configName(i, 3, "dwell_time"), "Time to dwell in the zone before triggering, in ms", 150);
+        v.specialWorkspace = makeShared<Config::Values::String>(configName(i, 4, "special_workspace"), "Name of the special workspace to toggle", "");
+        v.targetMonitor    = makeShared<Config::Values::String>(configName(i, 5, "target_monitor"), "Monitor name, or * for all monitors", "*");
+
+        for (const auto& val : std::initializer_list<SP<Config::Values::IValue>>{v.enabled, v.side, v.triggerWidth, v.dwellTime, v.specialWorkspace, v.targetMonitor}) {
+            if (!HyprlandAPI::addConfigValueV2(PHANDLE, val))
+                Log::logger->log(Log::ERR, "[HotEdge] Failed to register config value {}", val->name());
+        }
+    }
+}
+
 void CHotEdge::reloadConfig() {
     for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
-        std::string prefix = std::string("plugin:hot-edge:") + EDGE_SLOT_NAMES[i] + ":";
+        const auto& v = m_configValues[i];
 
-        static std::array<Hyprlang::INT* const*, MAX_EDGE_SLOTS> pEnabled;
-        static std::array<Hyprlang::STRING const*, MAX_EDGE_SLOTS> pSide;
-        static std::array<Hyprlang::INT* const*, MAX_EDGE_SLOTS> pWidth;
-        static std::array<Hyprlang::INT* const*, MAX_EDGE_SLOTS> pDwell;
-        static std::array<Hyprlang::STRING const*, MAX_EDGE_SLOTS> pWorkspace;
-        static std::array<Hyprlang::STRING const*, MAX_EDGE_SLOTS> pMonitor;
+        // registerConfigValues() has not run (or failed) — keep the struct defaults
+        // rather than dereferencing anything.
+        if (!v.enabled || !v.side || !v.triggerWidth || !v.dwellTime || !v.specialWorkspace || !v.targetMonitor)
+            continue;
 
-        pEnabled[i] = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(PHANDLE, (prefix + "enabled").c_str())->getDataStaticPtr();
-        pSide[i] = (Hyprlang::STRING const*)HyprlandAPI::getConfigValue(PHANDLE, (prefix + "side").c_str())->getDataStaticPtr();
-        pWidth[i] = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(PHANDLE, (prefix + "trigger_width").c_str())->getDataStaticPtr();
-        pDwell[i] = (Hyprlang::INT* const*)HyprlandAPI::getConfigValue(PHANDLE, (prefix + "dwell_time").c_str())->getDataStaticPtr();
-        pWorkspace[i] = (Hyprlang::STRING const*)HyprlandAPI::getConfigValue(PHANDLE, (prefix + "special_workspace").c_str())->getDataStaticPtr();
-        pMonitor[i] = (Hyprlang::STRING const*)HyprlandAPI::getConfigValue(PHANDLE, (prefix + "target_monitor").c_str())->getDataStaticPtr();
-
-        m_edges[i].enabled = **pEnabled[i];
-        m_edges[i].side = parseSide(*pSide[i]);
-        m_edges[i].triggerWidth = **pWidth[i];
-        m_edges[i].dwellTime = **pDwell[i];
-        m_edges[i].specialWorkspace = *pWorkspace[i];
-        m_edges[i].targetMonitor = *pMonitor[i];
+        m_edges[i].enabled = v.enabled->value();
+        m_edges[i].side = parseSide(v.side->value());
+        m_edges[i].triggerWidth = v.triggerWidth->value();
+        m_edges[i].dwellTime = v.dwellTime->value();
+        m_edges[i].specialWorkspace = v.specialWorkspace->value();
+        m_edges[i].targetMonitor = v.targetMonitor->value();
 
         // Default to "*" (all monitors) if not specified
         if (m_edges[i].targetMonitor.empty())
@@ -107,15 +138,11 @@ void CHotEdge::reloadConfig() {
 }
 
 PHLMONITOR CHotEdge::getCurrentMonitor() {
-    return g_pCompositor->getMonitorFromCursor();
+    return monitorAtCursor();
 }
 
 PHLMONITOR CHotEdge::getMonitorByName(const std::string& name) {
-    for (auto& m : g_pCompositor->m_monitors) {
-        if (m->m_name == name)
-            return m;
-    }
-    return nullptr;
+    return State::monitorState()->query().name(name).run();
 }
 
 bool CHotEdge::isEdgeEnabledForMonitor(int slotIndex, PHLMONITOR monitor) {
@@ -138,7 +165,7 @@ bool CHotEdge::isOverlayVisible(int slotIndex) const {
     if (slotIndex < 0 || slotIndex >= MAX_EDGE_SLOTS)
         return false;
 
-    auto monitor = g_pCompositor->getMonitorFromCursor();
+    auto monitor = monitorAtCursor();
     if (!monitor || !monitor->m_activeSpecialWorkspace)
         return false;
 
@@ -537,7 +564,7 @@ int CHotEdge::parseEdgeArg(const std::string& arg) {
 
     if (isSideName && g_pHotEdge) {
         // Find the slot that matches this side AND the current monitor
-        auto cursorMonitor = g_pCompositor->getMonitorFromCursor();
+        auto cursorMonitor = monitorAtCursor();
         if (cursorMonitor) {
             for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
                 if (g_pHotEdge->m_edges[i].enabled &&
