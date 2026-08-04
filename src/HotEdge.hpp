@@ -50,6 +50,11 @@ struct EdgeConfig {
     std::string specialWorkspace;   // name of special workspace to show
     std::string targetMonitor;      // monitor name ("*" = all, "DP-1" = specific)
     bool enabled = false;
+    // Auto-hide once the cursor leaves the panel rectangle. Turn off for a
+    // panel whose real size does not match getPanelArea()'s 1/3 assumption --
+    // a fullscreen workspace, most obviously, which would otherwise close as
+    // soon as the cursor left the corner quadrant it never occupied.
+    bool hideOnLeave = true;
 };
 
 // Handles returned by addConfigValueV2. Hyprland 0.56 deprecated the
@@ -63,6 +68,7 @@ struct EdgeConfigValues {
     SP<Config::Values::Int>    dwellTime;
     SP<Config::Values::String> specialWorkspace;
     SP<Config::Values::String> targetMonitor;
+    SP<Config::Values::Int>    hideOnLeave;
 };
 
 struct EdgeState {

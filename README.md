@@ -9,7 +9,7 @@ A Hyprland plugin that triggers special workspace overlays when the mouse cursor
 - **Corner dead margin**: a configured corner carves its own width + `corner_margin` (default 10px) out of both neighbouring edges, so sliding into the corner never clips the edge first
 - **Per-monitor support**: Assign edges to specific monitors or all monitors
 - **Multi-monitor aware**: Each monitor can have its own edge panels with separate animations
-- **Auto-hide**: Panels automatically close when cursor leaves the panel area
+- **Auto-hide**: Panels automatically close when cursor leaves the panel area, or opt out per slot with `hide_on_leave = 0` for fullscreen panels
 - **Dwell time**: Optional delay before triggering (prevents accidental activation)
 - **Instant slam trigger**: Hitting the absolute screen edge (or the exact corner pixel) triggers immediately, bypassing dwell
 - **Keyboard toggle**: Hotkeys to show/hide panels with grace period to prevent immediate close
@@ -150,6 +150,45 @@ workspace = special:hotedge-topright-mon1, gapsout:0 0 960 1700
 workspace = special:hotedge-top, gapsout:0 0 960 0
 ```
 
+### Fullscreen panels
+
+The plugin never sizes a panel -- that is entirely your `workspace` rule. But it
+does assume, for auto-hide, that the panel is the 1/3-of-screen rectangle
+`getPanelArea()` computes. Make a panel fullscreen without telling it and the
+panel closes the instant the cursor leaves that rectangle, while still visibly
+covering the screen.
+
+So a fullscreen panel needs both halves:
+
+```conf
+plugin {
+    hot-edge {
+        edge5 {
+            enabled = 1
+            side = bottomleft
+            special_workspace = hotedge-fullscreen
+            target_monitor = DP-3
+            hide_on_leave = 0          # <- without this it closes immediately
+        }
+    }
+}
+
+workspace = special:hotedge-fullscreen, gapsout:0 0 0 0
+```
+
+Give yourself a way to close it, since the cursor no longer does:
+
+```conf
+bind = SUPER CTRL, B, hotedge:toggle, bottomleft
+```
+
+It also closes when focus leaves its workspace, when the cursor moves to another
+monitor, or when **another panel takes over** -- Hyprland allows one active
+special workspace per monitor, so flicking to a configured edge displaces the
+fullscreen panel, and that edge then auto-hides itself. That makes an ordinary
+edge a usable dismiss gesture. Note the edge must lie outside the corner's dead
+band (`trigger_width + corner_margin`) for the flick to register.
+
 ### Animation
 
 ```conf
@@ -180,6 +219,7 @@ decoration {
 | `dwell_time` | int | 150 | Milliseconds to wait in the zone before triggering. `0` = fire the moment the zone is entered. Ignored when you hit the absolute edge/corner pixel, which is always instant |
 | `special_workspace` | string | "" | Name of the special workspace to toggle |
 | `target_monitor` | string | "*" | Monitor name or "*" for all monitors |
+| `hide_on_leave` | int | 1 | Auto-hide once the cursor leaves the panel area. Set `0` for a panel whose real size does not match the 1/3-of-screen rectangle the plugin assumes -- a fullscreen workspace above all. It then closes only on focus loss, monitor change, another panel taking over, or a dispatcher |
 
 ### Global Options
 

@@ -88,7 +88,11 @@ void CHotEdge::registerCallbacks() {
 
 bool CHotEdge::hasPendingState() const {
     for (const auto& s : m_states) {
-        if (s.bDwelling || s.bHideDelaying)
+        // bJustShown counts: processEdge returns early for the whole 800ms
+        // grace period, so without it the timer disarms, and a cursor that
+        // stopped moving inside that window never gets the tick that would
+        // start the auto-hide. The panel then stayed open indefinitely.
+        if (s.bDwelling || s.bHideDelaying || s.bJustShown)
             return true;
     }
     return false;
@@ -158,7 +162,7 @@ namespace {
     // copy. These backing strings must therefore outlive the value objects, so
     // they live at namespace scope in a fixed array (never reallocates, unlike a
     // vector, whose SSO buffers would move and dangle the stored pointers).
-    constexpr int                                     FIELDS_PER_SLOT = 6;
+    constexpr int                                     FIELDS_PER_SLOT = 7;
     std::array<std::string, MAX_EDGE_SLOTS * FIELDS_PER_SLOT> g_configNames;
 
     const char* configName(int slot, int field, const char* suffix) {
@@ -178,8 +182,9 @@ void CHotEdge::registerConfigValues() {
         v.dwellTime        = makeShared<Config::Values::Int>(configName(i, 3, "dwell_time"), "Time to dwell in the zone before triggering, in ms", 150);
         v.specialWorkspace = makeShared<Config::Values::String>(configName(i, 4, "special_workspace"), "Name of the special workspace to toggle", "");
         v.targetMonitor    = makeShared<Config::Values::String>(configName(i, 5, "target_monitor"), "Monitor name, or * for all monitors", "*");
+        v.hideOnLeave      = makeShared<Config::Values::Int>(configName(i, 6, "hide_on_leave"), "Auto-hide when the cursor leaves the panel area", 1);
 
-        for (const auto& val : std::initializer_list<SP<Config::Values::IValue>>{v.enabled, v.side, v.triggerWidth, v.dwellTime, v.specialWorkspace, v.targetMonitor}) {
+        for (const auto& val : std::initializer_list<SP<Config::Values::IValue>>{v.enabled, v.side, v.triggerWidth, v.dwellTime, v.specialWorkspace, v.targetMonitor, v.hideOnLeave}) {
             if (!HyprlandAPI::addConfigValueV2(PHANDLE, val))
                 Log::logger->log(Log::ERR, "[HotEdge] Failed to register config value {}", val->name());
         }
@@ -204,7 +209,7 @@ void CHotEdge::reloadConfig() {
 
         // registerConfigValues() has not run (or failed) — keep the struct defaults
         // rather than dereferencing anything.
-        if (!v.enabled || !v.side || !v.triggerWidth || !v.dwellTime || !v.specialWorkspace || !v.targetMonitor)
+        if (!v.enabled || !v.side || !v.triggerWidth || !v.dwellTime || !v.specialWorkspace || !v.targetMonitor || !v.hideOnLeave)
             continue;
 
         m_edges[i].enabled = v.enabled->value();
@@ -213,6 +218,7 @@ void CHotEdge::reloadConfig() {
         m_edges[i].dwellTime = v.dwellTime->value();
         m_edges[i].specialWorkspace = v.specialWorkspace->value();
         m_edges[i].targetMonitor = v.targetMonitor->value();
+        m_edges[i].hideOnLeave = v.hideOnLeave->value();
 
         // Default to "*" (all monitors) if not specified
         if (m_edges[i].targetMonitor.empty())
@@ -545,8 +551,12 @@ void CHotEdge::processEdge(int slotIndex) {
     }
 
     // Auto-hide when cursor leaves panel area (but not if at edge)
-    // Use a small delay to allow animation and prevent accidental closes
-    if (visible && !inPanel && !inZone && !atEdge) {
+    // Use a small delay to allow animation and prevent accidental closes.
+    // hide_on_leave = 0 opts out entirely: the panel then lives until focus
+    // leaves its workspace, the cursor changes monitor, or a dispatcher hides
+    // it. That is the only sane mode for a panel that is not actually the
+    // 1/3-of-screen rectangle getPanelArea() assumes.
+    if (config.hideOnLeave && visible && !inPanel && !inZone && !atEdge) {
         if (!state.bHideDelaying) {
             state.bHideDelaying = true;
             state.hideDelayStart = steady_clock::now();
