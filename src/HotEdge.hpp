@@ -37,10 +37,11 @@ inline bool isCornerSide(EdgeSide s) {
 // A corner zone would otherwise sit inside both of its composing edge zones, so
 // sliding toward the corner clips the edge first and opens the wrong panel.
 // Each configured corner instead carves its own width plus this margin out of
-// both neighbouring edges, leaving a gap the edges never trigger in.
-// ponytail: one constant, not a config value — make it a per-slot option only if
-// someone actually wants to tune it.
-constexpr int CORNER_DEAD_MARGIN = 10;
+// both neighbouring edges, leaving a gap the edges never trigger in. The gap is
+// exactly this value: the edge is inset by trigger_width + margin, and the
+// corner occupies the trigger_width part of it.
+// Overridable with the single global plugin:hot-edge:corner_margin.
+constexpr int DEFAULT_CORNER_MARGIN = 10;
 
 struct EdgeConfig {
     EdgeSide side = EdgeSide::RIGHT;
@@ -136,6 +137,12 @@ private:
     std::array<EdgeConfig, MAX_EDGE_SLOTS> m_edges;
     std::array<EdgeState, MAX_EDGE_SLOTS> m_states;
     std::array<EdgeConfigValues, MAX_EDGE_SLOTS> m_configValues;
+
+    // Single global, not per-slot: it is a feel setting for how far edges keep
+    // clear of corners, and a different value per edge would just make the
+    // layout inconsistent.
+    SP<Config::Values::Int> m_cornerMarginValue;
+    int                     m_cornerMargin = DEFAULT_CORNER_MARGIN;
 
     bool m_active = true;
 

@@ -184,9 +184,21 @@ void CHotEdge::registerConfigValues() {
                 Log::logger->log(Log::ERR, "[HotEdge] Failed to register config value {}", val->name());
         }
     }
+
+    // Global, so it needs no entry in g_configNames — a string literal already
+    // has the static storage duration IValue's bare const char* name requires.
+    m_cornerMarginValue = makeShared<Config::Values::Int>(
+        "plugin:hot-edge:corner_margin",
+        "Gap in px between a corner zone and the edges either side of it", DEFAULT_CORNER_MARGIN);
+    if (!HyprlandAPI::addConfigValueV2(PHANDLE, m_cornerMarginValue))
+        Log::logger->log(Log::ERR, "[HotEdge] Failed to register config value corner_margin");
 }
 
 void CHotEdge::reloadConfig() {
+    // Negative would push edges back over the corner they are meant to avoid.
+    if (m_cornerMarginValue)
+        m_cornerMargin = std::max<int>(0, m_cornerMarginValue->value());
+
     for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
         const auto& v = m_configValues[i];
 
@@ -312,7 +324,7 @@ std::pair<double, double> CHotEdge::cornerInsets(PHLMONITOR monitor, EdgeSide si
         if (!isEdgeEnabledForMonitor(i, monitor))
             continue;
 
-        const double claim = m_edges[i].triggerWidth + CORNER_DEAD_MARGIN;
+        const double claim = m_edges[i].triggerWidth + m_cornerMargin;
         if (m_edges[i].side == loCorner)
             lo = std::max(lo, claim);
         if (m_edges[i].side == hiCorner)

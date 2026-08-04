@@ -6,7 +6,7 @@ A Hyprland plugin that triggers special workspace overlays when the mouse cursor
 
 - **Slot-based configuration**: Up to 16 independent triggers (edge1-edge16)
 - **Edges and corners**: 4 edges plus 4 corners per monitor
-- **Corner dead margin**: a configured corner carves its own width + 10px out of both neighbouring edges, so sliding into the corner never clips the edge first
+- **Corner dead margin**: a configured corner carves its own width + `corner_margin` (default 10px) out of both neighbouring edges, so sliding into the corner never clips the edge first
 - **Per-monitor support**: Assign edges to specific monitors or all monitors
 - **Multi-monitor aware**: Each monitor can have its own edge panels with separate animations
 - **Auto-hide**: Panels automatically close when cursor leaves the panel area
@@ -66,6 +66,10 @@ plugin {
         # Each slot can be any edge on any monitor
         # side = left/right/top/bottom/topleft/topright/bottomleft/bottomright
         # target_monitor = "*" for all, or specific name like "DP-1"
+
+        # Gap in px between a corner zone and the edges either side of it.
+        # Global - applies to every corner on every monitor.
+        corner_margin = 10
 
         edge1 {
             enabled = 1
@@ -176,6 +180,25 @@ decoration {
 | `dwell_time` | int | 150 | Milliseconds to wait in the zone before triggering. `0` = fire the moment the zone is entered. Ignored when you hit the absolute edge/corner pixel, which is always instant |
 | `special_workspace` | string | "" | Name of the special workspace to toggle |
 | `target_monitor` | string | "*" | Monitor name or "*" for all monitors |
+
+### Global Options
+
+Set directly under `hot-edge`, not inside a slot:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `corner_margin` | int | 10 | Gap in px between a corner zone and the edges either side of it. An edge is inset by that corner's `trigger_width + corner_margin`, and the corner occupies the `trigger_width` part, so the untriggerable gap is exactly `corner_margin`. Clamped at 0 |
+
+The two corner knobs do different jobs, and it is easy to reach for the wrong one:
+
+- `trigger_width` on the corner slot sizes **the corner target itself** (a
+  `trigger_width` x `trigger_width` square). Raise it to make the corner easier
+  to hit.
+- `corner_margin` only pushes **the neighbouring edges further away**. It does
+  not enlarge the corner.
+
+With `trigger_width = 15` and `corner_margin = 100`, the corner is still a 15x15
+square at 0-15; 15-115 triggers nothing at all, and the edge resumes at 115.
 
 ## Dispatchers
 
@@ -290,12 +313,23 @@ hyprctl monitors | grep Monitor
   [Reloading during development](#reloading-during-development)
 
 ### Edge dead near a corner
-Expected: a configured corner reserves `trigger_width + 10px` of both adjacent
-edges. Lower the corner's `trigger_width` to shrink the gap.
+Expected: a configured corner reserves `trigger_width + corner_margin` of both
+adjacent edges. Lower `corner_margin` (or the corner's `trigger_width`) to
+shrink the gap; raise `corner_margin` if you keep catching the edge on your way
+into the corner.
+
+### Config change had no effect
+`hyprctl keyword plugin:hot-edge:...` updates Hyprland's registry but does **not**
+reach the plugin -- it reads its values on the config-reloaded event, which
+`keyword` does not raise. Edit `hyprland.conf` and run `hyprctl reload` instead.
+`hyprctl getoption` will happily show the new value either way, so it is not a
+reliable check that the setting is live.
 
 ### Corner feels slow
 Only the exact corner pixel bypasses `dwell_time`. Set `dwell_time = 0` on the
-corner slot to fire as soon as the square is entered.
+corner slot to fire as soon as the square is entered, and/or raise the corner's
+`trigger_width` to make that square a bigger target. Raising `corner_margin`
+will not help -- it moves the edges away, it does not grow the corner.
 
 ### Panel closes immediately
 - Check if cursor is in the panel area when it opens
