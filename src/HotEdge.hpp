@@ -5,6 +5,7 @@
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/helpers/signal/Signal.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <hyprland/src/config/values/ConfigValues.hpp>
 
 #include <string>
@@ -15,13 +16,31 @@ enum class EdgeSide {
     LEFT = 0,
     RIGHT = 1,
     TOP = 2,
-    BOTTOM = 3
+    BOTTOM = 3,
+    TOP_LEFT = 4,
+    TOP_RIGHT = 5,
+    BOTTOM_LEFT = 6,
+    BOTTOM_RIGHT = 7
 };
 
-// Support up to 8 edge configurations (enough for 4 edges × 2 monitors)
-constexpr int MAX_EDGE_SLOTS = 8;
-constexpr const char* EDGE_SLOT_NAMES[] = {"edge1", "edge2", "edge3", "edge4", "edge5", "edge6", "edge7", "edge8"};
-constexpr const char* SIDE_NAMES[] = {"left", "right", "top", "bottom"};
+// Support up to 16 configurations (8 zones — 4 edges + 4 corners — × 2 monitors)
+constexpr int MAX_EDGE_SLOTS = 16;
+constexpr const char* EDGE_SLOT_NAMES[] = {"edge1", "edge2", "edge3", "edge4", "edge5", "edge6", "edge7", "edge8",
+                                           "edge9", "edge10", "edge11", "edge12", "edge13", "edge14", "edge15", "edge16"};
+constexpr const char* SIDE_NAMES[] = {"left", "right", "top", "bottom",
+                                      "topleft", "topright", "bottomleft", "bottomright"};
+
+inline bool isCornerSide(EdgeSide s) {
+    return s >= EdgeSide::TOP_LEFT;
+}
+
+// A corner zone would otherwise sit inside both of its composing edge zones, so
+// sliding toward the corner clips the edge first and opens the wrong panel.
+// Each configured corner instead carves its own width plus this margin out of
+// both neighbouring edges, leaving a gap the edges never trigger in.
+// ponytail: one constant, not a config value — make it a per-slot option only if
+// someone actually wants to tune it.
+constexpr int CORNER_DEAD_MARGIN = 10;
 
 struct EdgeConfig {
     EdgeSide side = EdgeSide::RIGHT;
@@ -103,15 +122,28 @@ private:
     PHLMONITOR getMonitorByName(const std::string& name);
     CBox getEdgeZone(PHLMONITOR monitor, EdgeSide side, int triggerWidth);
     CBox getPanelArea(PHLMONITOR monitor, EdgeSide side);
+    // How much an edge must give up at each end to the corners configured on
+    // this monitor. .first is the low end (top for vertical edges, left for
+    // horizontal), .second the high end. Always {0,0} for a corner side.
+    std::pair<double, double> cornerInsets(PHLMONITOR monitor, EdgeSide side);
 
     static int parseEdgeArg(const std::string& arg);
     static EdgeSide parseSide(const std::string& str);
+
+    bool hasPendingState() const;
+    void armPendingTimer();
 
     std::array<EdgeConfig, MAX_EDGE_SLOTS> m_edges;
     std::array<EdgeState, MAX_EDGE_SLOTS> m_states;
     std::array<EdgeConfigValues, MAX_EDGE_SLOTS> m_configValues;
 
     bool m_active = true;
+
+    // mouse.move is the only tick source, so a dwell or hide delay armed by the
+    // final motion event would never elapse while the cursor sits perfectly
+    // still — the panel simply never appeared until you jiggled the mouse. This
+    // re-ticks while any slot has something pending, and stays disarmed otherwise.
+    SP<CEventLoopTimer> m_pendingTimer;
 
     // Event-bus listener handles. Stored as members so they unregister when
     // CHotEdge is destroyed (in PLUGIN_EXIT) — replaces the previous static-local

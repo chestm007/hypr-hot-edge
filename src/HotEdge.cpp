@@ -23,6 +23,15 @@ CHotEdge::CHotEdge() {
 
 CHotEdge::~CHotEdge() {
     Log::logger->log(Log::DEBUG, "[HotEdge] Destroying...");
+
+    // Drop the timer explicitly rather than relying on the SP going out of
+    // scope — the event loop must not hold a callback into a plugin that is
+    // about to be dlclose'd.
+    if (m_pendingTimer && g_pEventLoopManager) {
+        m_pendingTimer->cancel();
+        g_pEventLoopManager->removeTimer(m_pendingTimer);
+        m_pendingTimer.reset();
+    }
 }
 
 void CHotEdge::init() {
@@ -64,6 +73,48 @@ void CHotEdge::registerCallbacks() {
             if (g_pHotEdge)
                 g_pHotEdge->onMonitorRemoved(pMonitor);
         });
+
+    // Created disarmed; onTick arms it only while a dwell or hide delay is
+    // outstanding, so a still cursor still gets its timers to fire.
+    m_pendingTimer = makeShared<CEventLoopTimer>(
+        std::nullopt,
+        [](SP<CEventLoopTimer>, void*) {
+            if (g_pHotEdge)
+                g_pHotEdge->onTick();
+        },
+        nullptr);
+    g_pEventLoopManager->addTimer(m_pendingTimer);
+}
+
+bool CHotEdge::hasPendingState() const {
+    for (const auto& s : m_states) {
+        if (s.bDwelling || s.bHideDelaying)
+            return true;
+    }
+    return false;
+}
+
+// Must run on EVERY exit path out of onTick, including the throttled one: the
+// timer that just fired is disarmed by definition, so an early return without
+// re-arming would strand a pending dwell exactly as the original bug did.
+void CHotEdge::armPendingTimer() {
+    if (!m_pendingTimer || !g_pEventLoopManager)
+        return;
+
+    // Arm from an idle callback rather than inline: CEventLoopTimer::call()
+    // resets the expiry around dispatching, so re-arming from inside the timer's
+    // own callback is racy and intermittently left the timer dead — which showed
+    // up as the panel appearing on some approaches but not others.
+    // Captures an SP copy, never `this`, so a late fire cannot touch a destroyed
+    // CHotEdge.
+    const bool pending = hasPendingState();
+    auto       timer   = m_pendingTimer;
+    g_pEventLoopManager->doLater([timer, pending]() {
+        if (pending)
+            timer->updateTimeout(std::chrono::milliseconds(16));
+        else
+            timer->updateTimeout(std::nullopt);
+    });
 }
 
 EdgeSide CHotEdge::parseSide(const std::string& str) {
@@ -78,8 +129,28 @@ EdgeSide CHotEdge::parseSide(const std::string& str) {
         return EdgeSide::TOP;
     if (lower == "bottom" || lower == "b" || lower == "3")
         return EdgeSide::BOTTOM;
+    if (lower == "topleft" || lower == "top-left" || lower == "tl" || lower == "4")
+        return EdgeSide::TOP_LEFT;
+    if (lower == "topright" || lower == "top-right" || lower == "tr" || lower == "5")
+        return EdgeSide::TOP_RIGHT;
+    if (lower == "bottomleft" || lower == "bottom-left" || lower == "bl" || lower == "6")
+        return EdgeSide::BOTTOM_LEFT;
+    if (lower == "bottomright" || lower == "bottom-right" || lower == "br" || lower == "7")
+        return EdgeSide::BOTTOM_RIGHT;
 
     return EdgeSide::RIGHT;  // Default
+}
+
+// The corners sitting at each end of an edge, low end first (top for vertical
+// edges, left for horizontal ones).
+static std::array<EdgeSide, 2> edgeCorners(EdgeSide s) {
+    switch (s) {
+        case EdgeSide::LEFT:   return {EdgeSide::TOP_LEFT, EdgeSide::BOTTOM_LEFT};
+        case EdgeSide::RIGHT:  return {EdgeSide::TOP_RIGHT, EdgeSide::BOTTOM_RIGHT};
+        case EdgeSide::TOP:    return {EdgeSide::TOP_LEFT, EdgeSide::TOP_RIGHT};
+        case EdgeSide::BOTTOM: return {EdgeSide::BOTTOM_LEFT, EdgeSide::BOTTOM_RIGHT};
+        default:               return {s, s};
+    }
 }
 
 namespace {
@@ -199,17 +270,55 @@ CBox CHotEdge::getEdgeZone(PHLMONITOR monitor, EdgeSide side, int triggerWidth) 
     const auto& pos = monitor->m_position;
     const auto& size = monitor->m_size;
 
+    // Edges stop short of any corner configured on this monitor, so approaching
+    // the corner never clips the edge on the way in.
+    const auto [lo, hi] = cornerInsets(monitor, side);
+    const double spanX = std::max(0.0, size.x - lo - hi);
+    const double spanY = std::max(0.0, size.y - lo - hi);
+
     switch (side) {
         case EdgeSide::LEFT:
-            return CBox{pos.x, pos.y, (double)triggerWidth, size.y};
+            return CBox{pos.x, pos.y + lo, (double)triggerWidth, spanY};
         case EdgeSide::RIGHT:
-            return CBox{pos.x + size.x - triggerWidth, pos.y, (double)triggerWidth, size.y};
+            return CBox{pos.x + size.x - triggerWidth, pos.y + lo, (double)triggerWidth, spanY};
         case EdgeSide::TOP:
-            return CBox{pos.x, pos.y, size.x, (double)triggerWidth};
+            return CBox{pos.x + lo, pos.y, spanX, (double)triggerWidth};
         case EdgeSide::BOTTOM:
-            return CBox{pos.x, pos.y + size.y - triggerWidth, size.x, (double)triggerWidth};
+            return CBox{pos.x + lo, pos.y + size.y - triggerWidth, spanX, (double)triggerWidth};
+        // Corners: a triggerWidth square in the corner, so they stay tunable with
+        // the same knob as the edges.
+        case EdgeSide::TOP_LEFT:
+            return CBox{pos.x, pos.y, (double)triggerWidth, (double)triggerWidth};
+        case EdgeSide::TOP_RIGHT:
+            return CBox{pos.x + size.x - triggerWidth, pos.y, (double)triggerWidth, (double)triggerWidth};
+        case EdgeSide::BOTTOM_LEFT:
+            return CBox{pos.x, pos.y + size.y - triggerWidth, (double)triggerWidth, (double)triggerWidth};
+        case EdgeSide::BOTTOM_RIGHT:
+            return CBox{pos.x + size.x - triggerWidth, pos.y + size.y - triggerWidth, (double)triggerWidth, (double)triggerWidth};
     }
     return CBox{0, 0, 0, 0};
+}
+
+std::pair<double, double> CHotEdge::cornerInsets(PHLMONITOR monitor, EdgeSide side) {
+    if (!monitor || isCornerSide(side))
+        return {0.0, 0.0};
+
+    const auto [loCorner, hiCorner] = edgeCorners(side);
+    double lo = 0.0, hi = 0.0;
+
+    for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
+        if (!m_edges[i].enabled || !isCornerSide(m_edges[i].side))
+            continue;
+        if (!isEdgeEnabledForMonitor(i, monitor))
+            continue;
+
+        const double claim = m_edges[i].triggerWidth + CORNER_DEAD_MARGIN;
+        if (m_edges[i].side == loCorner)
+            lo = std::max(lo, claim);
+        if (m_edges[i].side == hiCorner)
+            hi = std::max(hi, claim);
+    }
+    return {lo, hi};
 }
 
 CBox CHotEdge::getPanelArea(PHLMONITOR monitor, EdgeSide side) {
@@ -232,6 +341,15 @@ CBox CHotEdge::getPanelArea(PHLMONITOR monitor, EdgeSide side) {
             return CBox{pos.x, pos.y, size.x, panelHeight};
         case EdgeSide::BOTTOM:
             return CBox{pos.x, pos.y + size.y - panelHeight, size.x, panelHeight};
+        // Corners get the quadrant, i.e. the intersection of their two edge strips.
+        case EdgeSide::TOP_LEFT:
+            return CBox{pos.x, pos.y, panelWidth, panelHeight};
+        case EdgeSide::TOP_RIGHT:
+            return CBox{pos.x + size.x - panelWidth, pos.y, panelWidth, panelHeight};
+        case EdgeSide::BOTTOM_LEFT:
+            return CBox{pos.x, pos.y + size.y - panelHeight, panelWidth, panelHeight};
+        case EdgeSide::BOTTOM_RIGHT:
+            return CBox{pos.x + size.x - panelWidth, pos.y + size.y - panelHeight, panelWidth, panelHeight};
     }
     return CBox{0, 0, 0, 0};
 }
@@ -265,34 +383,55 @@ bool CHotEdge::isCursorAtScreenEdge(int slotIndex, PHLMONITOR monitor) {
     const auto& size = monitor->m_size;
 
     // Check if cursor is at the absolute screen boundary (within 2-3 pixels)
+    const bool atLeft   = cursorPos.x <= pos.x + 2;
+    const bool atRight  = cursorPos.x >= pos.x + size.x - 3;
+    const bool atTop    = cursorPos.y <= pos.y + 2;
+    const bool atBottom = cursorPos.y >= pos.y + size.y - 3;
+
+    // The instant no-dwell trigger has to honour the corner dead zone too, or the
+    // edge still wins the race to the corner along the last few pixels.
+    const auto [lo, hi] = cornerInsets(monitor, m_edges[slotIndex].side);
+    const bool inSpanX = cursorPos.x >= pos.x + lo && cursorPos.x <= pos.x + size.x - hi;
+    const bool inSpanY = cursorPos.y >= pos.y + lo && cursorPos.y <= pos.y + size.y - hi;
+
     switch (m_edges[slotIndex].side) {
-        case EdgeSide::LEFT:
-            return cursorPos.x <= pos.x + 2;
-        case EdgeSide::RIGHT:
-            return cursorPos.x >= pos.x + size.x - 3;
-        case EdgeSide::TOP:
-            return cursorPos.y <= pos.y + 2;
-        case EdgeSide::BOTTOM:
-            return cursorPos.y >= pos.y + size.y - 3;
+        case EdgeSide::LEFT:          return atLeft && inSpanY;
+        case EdgeSide::RIGHT:         return atRight && inSpanY;
+        case EdgeSide::TOP:           return atTop && inSpanX;
+        case EdgeSide::BOTTOM:        return atBottom && inSpanX;
+        // A corner needs both of its boundaries — this is the pixel the pointer
+        // physically cannot overshoot, so it triggers without dwell.
+        case EdgeSide::TOP_LEFT:      return atTop && atLeft;
+        case EdgeSide::TOP_RIGHT:     return atTop && atRight;
+        case EdgeSide::BOTTOM_LEFT:   return atBottom && atLeft;
+        case EdgeSide::BOTTOM_RIGHT:  return atBottom && atRight;
     }
     return false;
 }
 
 void CHotEdge::onTick() {
-    if (!m_active)
+    if (!m_active) {
+        armPendingTimer();
         return;
+    }
 
-    // Throttle to ~60Hz; mouse.move fires per-pixel.
-    static auto lastTick = steady_clock::time_point{};
-    const auto now = steady_clock::now();
-    if (duration_cast<milliseconds>(now - lastTick).count() < 16)
-        return;
-    lastTick = now;
+    // No throttle here. There used to be a 16ms one, but onTick is the only
+    // place zone state is updated, so a dropped tick drops a *transition*: lose
+    // the one that clears bCursorInZone on the way out and re-entering the zone
+    // never starts a new dwell, so the panel silently never opens again. That
+    // was intermittent by construction — it depended on when the last tick ran.
+    // The work is a handful of box tests per enabled slot; cheap enough to run
+    // on every motion event.
 
+    // Corners need no special ordering here: getEdgeZone() already keeps each
+    // edge clear of the corners configured on its monitor, so the zones are
+    // disjoint and at most one can claim the cursor.
     for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
         if (m_edges[i].enabled)
             processEdge(i);
     }
+
+    armPendingTimer();
 }
 
 void CHotEdge::processEdge(int slotIndex) {
@@ -541,25 +680,32 @@ int CHotEdge::parseEdgeArg(const std::string& arg) {
     }
 
     // Check for numeric index
-    if (lower.size() == 1 && lower[0] >= '1' && lower[0] <= '8')
-        return lower[0] - '1';
+    if (lower.find_first_not_of("0123456789") == std::string::npos && !lower.empty()) {
+        const int n = std::stoi(lower);
+        if (n >= 1 && n <= MAX_EDGE_SLOTS)
+            return n - 1;
+    }
 
     // Check for side names - find slot matching side AND current monitor
+    static const std::pair<const char*, EdgeSide> SIDE_ARGS[] = {
+        {"left", EdgeSide::LEFT},                {"l", EdgeSide::LEFT},
+        {"right", EdgeSide::RIGHT},              {"r", EdgeSide::RIGHT},
+        {"top", EdgeSide::TOP},                  {"t", EdgeSide::TOP},
+        {"bottom", EdgeSide::BOTTOM},            {"b", EdgeSide::BOTTOM},
+        {"topleft", EdgeSide::TOP_LEFT},         {"top-left", EdgeSide::TOP_LEFT},         {"tl", EdgeSide::TOP_LEFT},
+        {"topright", EdgeSide::TOP_RIGHT},       {"top-right", EdgeSide::TOP_RIGHT},       {"tr", EdgeSide::TOP_RIGHT},
+        {"bottomleft", EdgeSide::BOTTOM_LEFT},   {"bottom-left", EdgeSide::BOTTOM_LEFT},   {"bl", EdgeSide::BOTTOM_LEFT},
+        {"bottomright", EdgeSide::BOTTOM_RIGHT}, {"bottom-right", EdgeSide::BOTTOM_RIGHT}, {"br", EdgeSide::BOTTOM_RIGHT},
+    };
+
     EdgeSide targetSide = EdgeSide::RIGHT;
     bool isSideName = false;
-
-    if (lower == "left" || lower == "l") {
-        targetSide = EdgeSide::LEFT;
-        isSideName = true;
-    } else if (lower == "right" || lower == "r") {
-        targetSide = EdgeSide::RIGHT;
-        isSideName = true;
-    } else if (lower == "top" || lower == "t") {
-        targetSide = EdgeSide::TOP;
-        isSideName = true;
-    } else if (lower == "bottom" || lower == "b") {
-        targetSide = EdgeSide::BOTTOM;
-        isSideName = true;
+    for (const auto& [name, side] : SIDE_ARGS) {
+        if (lower == name) {
+            targetSide = side;
+            isSideName = true;
+            break;
+        }
     }
 
     if (isSideName && g_pHotEdge) {

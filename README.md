@@ -1,15 +1,17 @@
 # hypr-hot-edge
 
-A Hyprland plugin that triggers special workspace overlays when the mouse cursor reaches screen edges. Similar to hot corners, but for edges.
+A Hyprland plugin that triggers special workspace overlays when the mouse cursor reaches a screen edge or corner. Each of the 4 edges and 4 corners can drive its own special workspace.
 
 ## Features
 
-- **Slot-based configuration**: Up to 8 independent edge triggers (edge1-edge8)
+- **Slot-based configuration**: Up to 16 independent triggers (edge1-edge16)
+- **Edges and corners**: 4 edges plus 4 corners per monitor
+- **Corner dead margin**: a configured corner carves its own width + 10px out of both neighbouring edges, so sliding into the corner never clips the edge first
 - **Per-monitor support**: Assign edges to specific monitors or all monitors
 - **Multi-monitor aware**: Each monitor can have its own edge panels with separate animations
 - **Auto-hide**: Panels automatically close when cursor leaves the panel area
 - **Dwell time**: Optional delay before triggering (prevents accidental activation)
-- **Instant edge trigger**: Moving cursor to absolute screen edge triggers immediately
+- **Instant slam trigger**: Hitting the absolute screen edge (or the exact corner pixel) triggers immediately, bypassing dwell
 - **Keyboard toggle**: Hotkeys to show/hide panels with grace period to prevent immediate close
 - **Smart dispatchers**: Toggle by side name (right/bottom) - automatically finds correct slot for current monitor
 
@@ -28,6 +30,22 @@ make
 # The plugin will be at build/hypr-hot-edge.so
 ```
 
+### Reloading during development
+
+Use `make reload`, not `make unload load`.
+
+`hyprctl plugin unload` reports `ok` but does not drop the mapping, so a
+following `load` of the **same path** gets the cached image back from `dlopen`
+and silently keeps running the old code -- reporting `ok` a second time. Every
+symptom looks like your change did nothing. `make reload` loads a uniquely
+named copy each time, which forces the linker to map the new build.
+
+To confirm which build is live, query an option that only exists in the new one:
+
+```bash
+hyprctl getoption plugin:hot-edge:edge9:enabled   # "no such option" => stale image
+```
+
 ### Requirements
 
 - Hyprland (built from source or with headers available)
@@ -42,11 +60,11 @@ Add to your `hyprland.conf`:
 # Load the plugin
 plugin = /path/to/hypr-hot-edge.so
 
-# Configure edge slots (edge1 through edge8)
+# Configure slots (edge1 through edge16)
 plugin {
     hot-edge {
         # Each slot can be any edge on any monitor
-        # side = left/right/top/bottom
+        # side = left/right/top/bottom/topleft/topright/bottomleft/bottomright
         # target_monitor = "*" for all, or specific name like "DP-1"
 
         edge1 {
@@ -85,7 +103,22 @@ plugin {
             target_monitor = DP-3
         }
 
-        # edge5 through edge8 available for more configurations
+        # Corners work the same way; the trigger zone is a
+        # trigger_width x trigger_width square in the corner.
+        # Enabling a corner also shrinks the two edges next to it on the
+        # same monitor by trigger_width + 10px, leaving a gap where
+        # neither fires - that gap is what stops the edge from winning
+        # the race to the corner.
+        edge5 {
+            enabled = 1
+            side = topright
+            trigger_width = 15
+            dwell_time = 150
+            special_workspace = hotedge-topright-mon1
+            target_monitor = HDMI-A-1
+        }
+
+        # edge6 through edge16 available for more configurations
     }
 }
 ```
@@ -105,6 +138,9 @@ workspace = special:hotedge-bottom-mon2, gapsout:960 0 0 0
 
 # Left panels (gap on right)
 workspace = special:hotedge-left, gapsout:0 1700 0 0
+
+# Corner panels (a quadrant: gap on the two opposite sides)
+workspace = special:hotedge-topright-mon1, gapsout:0 0 960 1700
 
 # Top panels (gap on bottom)
 workspace = special:hotedge-top, gapsout:0 0 960 0
@@ -135,9 +171,9 @@ decoration {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | int | 0 | Enable this edge slot (0 or 1) |
-| `side` | string | "right" | Edge side: `left`, `right`, `top`, `bottom` |
-| `trigger_width` | int | 15 | Pixel width of the trigger zone from edge |
-| `dwell_time` | int | 150 | Milliseconds to wait before triggering |
+| `side` | string | "right" | Zone: `left`, `right`, `top`, `bottom`, `topleft`, `topright`, `bottomleft`, `bottomright` |
+| `trigger_width` | int | 15 | Pixel width of the trigger zone; for a corner this is the side of its square, and it also sets how much of the neighbouring edges the corner reserves |
+| `dwell_time` | int | 150 | Milliseconds to wait in the zone before triggering. `0` = fire the moment the zone is entered. Ignored when you hit the absolute edge/corner pixel, which is always instant |
 | `special_workspace` | string | "" | Name of the special workspace to toggle |
 | `target_monitor` | string | "*" | Monitor name or "*" for all monitors |
 
@@ -151,6 +187,8 @@ bind = SUPER CTRL, H, hotedge:toggle, right
 bind = SUPER CTRL, B, hotedge:toggle, bottom
 bind = SUPER CTRL, L, hotedge:toggle, left
 bind = SUPER CTRL, T, hotedge:toggle, top
+bind = SUPER CTRL, Q, hotedge:toggle, topleft
+bind = SUPER CTRL, E, hotedge:toggle, topright
 
 # Toggle specific slot
 bind = SUPER CTRL, 1, hotedge:toggle, edge1
@@ -169,8 +207,9 @@ bind = SUPER CTRL, P, hotedge:toggle-active
 | Argument | Description |
 |----------|-------------|
 | `right`, `left`, `top`, `bottom` | Toggle edge by side for current monitor |
-| `edge1` - `edge8` | Toggle specific slot |
-| `1` - `8` | Toggle slot by number |
+| `topleft`, `topright`, `bottomleft`, `bottomright` | Toggle corner for current monitor (aliases: `tl`, `tr`, `bl`, `br`) |
+| `edge1` - `edge16` | Toggle specific slot |
+| `1` - `16` | Toggle slot by number |
 | *(empty)* | Toggle first visible or first enabled slot |
 
 ### Runtime Activation
@@ -228,8 +267,11 @@ hyprctl monitors | grep Monitor
 ## Behavior Notes
 
 - **Edge trigger**: Moving cursor to the absolute screen edge (last 2-3 pixels) triggers immediately, bypassing dwell time
+- **Corner trigger**: A corner needs *both* of its boundaries, so only the exact corner pixel is instant. Anywhere else inside the corner square waits out `dwell_time` -- if corners feel sluggish, set `dwell_time = 0` on that slot
+- **Corner dead margin**: each configured corner reserves `trigger_width + 10px` at the neighbouring ends of both its edges. Neither the edge nor the corner fires in that gap; it is what stops the edge from opening on your way into the corner
 - **Zone trigger**: Moving cursor into the trigger zone (configurable width) starts the dwell timer
 - **Auto-hide**: Panel closes when cursor leaves the panel area (with 150ms delay to prevent flicker)
+- **Timers do not need mouse movement**: dwell and auto-hide run on a compositor timer that is armed only while something is pending, so they still fire with the cursor sitting perfectly still
 - **Monitor-aware**: Moving cursor to another monitor automatically closes the panel on the previous monitor
 - **Keyboard grace period**: When toggling via keyboard, there's an 800ms grace period before auto-hide kicks in, giving you time to move your cursor to the panel
 
@@ -244,6 +286,16 @@ hyprctl monitors | grep Monitor
 - Verify `enabled = 1` in config
 - Check `target_monitor` matches your monitor name (`hyprctl monitors`)
 - Ensure `special_workspace` is set
+- If you just rebuilt, make sure the new build is actually loaded -- see
+  [Reloading during development](#reloading-during-development)
+
+### Edge dead near a corner
+Expected: a configured corner reserves `trigger_width + 10px` of both adjacent
+edges. Lower the corner's `trigger_width` to shrink the gap.
+
+### Corner feels slow
+Only the exact corner pixel bypasses `dwell_time`. Set `dwell_time = 0` on the
+corner slot to fire as soon as the square is entered.
 
 ### Panel closes immediately
 - Check if cursor is in the panel area when it opens
