@@ -7,7 +7,6 @@ commit_pins = []
 description = "Hot edge trigger for sliding special workspace overlays"
 output = "build/hypr-hot-edge.so"
 build = [
-  "make"
-    # "cmake -B build",
-    # "cmake --build build -j`nproc`"
+    "cmake -B build",
+    "cmake --build build -j`nproc`"
 ]
