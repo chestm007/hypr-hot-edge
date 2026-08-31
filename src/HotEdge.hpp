@@ -6,6 +6,7 @@
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/helpers/signal/Signal.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
+#include <hyprland/src/config/values/ConfigValues.hpp>
 
 #include <string>
 #include <chrono>
@@ -41,7 +42,8 @@ inline bool isCornerSide(EdgeSide s) {
 // both neighbouring edges, leaving a gap the edges never trigger in. The gap is
 // exactly this value: the edge is inset by trigger_width + margin, and the
 // corner occupies the trigger_width part of it.
-// Overridable with hl.plugin.hyprhotedge.set_corner_margin().
+// Overridable via hl.plugin.hyprhotedge.set_corner_margin() (Lua) or the
+// legacy plugin:hot-edge:corner_margin keyword (hyprland.conf).
 constexpr int DEFAULT_CORNER_MARGIN = 10;
 
 struct EdgeConfig {
@@ -70,6 +72,24 @@ struct EdgeDefinition {
     std::string specialWorkspace;
     std::string targetMonitor = "*";
     bool hideOnLeave = true;
+};
+
+// Handles returned by addConfigValueV2 for the legacy hyprlang config
+// (plugin:hot-edge:* keywords in hyprland.conf). Hyprland 0.56 deprecated the
+// name-lookup API (getConfigValue), which returns nullptr under the Lua config
+// manager — dereferencing that is what SIGSEGV'd the compositor. Holding the
+// value objects instead removes the lookup, so there is nothing to be null.
+// These coexist with the Lua definitions: on a reload, Lua add_edge() entries
+// win slot-by-slot and legacy keywords fill the remaining slots, so the two
+// paths can be used together or independently.
+struct EdgeConfigValues {
+    SP<Config::Values::Int>    enabled;
+    SP<Config::Values::String> side;
+    SP<Config::Values::Int>    triggerWidth;
+    SP<Config::Values::Int>    dwellTime;
+    SP<Config::Values::String> specialWorkspace;
+    SP<Config::Values::String> targetMonitor;
+    SP<Config::Values::Int>    hideOnLeave;
 };
 
 struct EdgeState {
@@ -113,6 +133,14 @@ public:
     static int luaAddEdge(lua_State* L);
     static int luaSetCornerMargin(lua_State* L);
 
+    // Legacy hyprlang config (plugin:hot-edge:* keywords in hyprland.conf).
+    // Must run inside pluginInit, before any reloadConfig() reads the values.
+    // The value objects are held as SPs (see EdgeConfigValues) rather than
+    // looked up by name — the deprecated getConfigValue() name lookup returns
+    // nullptr under the Lua config manager and dereferencing it SIGSEGV'd the
+    // compositor.
+    void registerConfigValues();
+
     // Configuration
     void reloadConfig();
 
@@ -152,12 +180,21 @@ private:
     // and the next reloaded event rebuilds m_edges from this list.
     std::vector<EdgeDefinition> m_definitions;
 
+    // Legacy hyprlang config value handles (plugin:hot-edge:edgeN:*,
+    // plugin:hot-edge:corner_margin). Populated by registerConfigValues();
+    // every slot's set is either fully present or fully absent, which lets
+    // reloadConfig() tell "legacy keyword registered" from "registration
+    // failed" without a name lookup.
+    std::array<EdgeConfigValues, MAX_EDGE_SLOTS> m_configValues;
+
     // Single global, not per-slot: it is a feel setting for how far edges keep
     // clear of corners, and a different value per edge would just make the
-    // layout inconsistent. Optional until set_corner_margin is called;
-    // reloadConfig() applies DEFAULT_CORNER_MARGIN when it is still absent.
+    // layout inconsistent. The Lua set_corner_margin() takes precedence when
+    // called; otherwise the legacy corner_margin keyword is used, and the
+    // compiled default when neither source set anything.
     std::optional<int> m_cornerMarginSetting;
-    int                m_cornerMargin = DEFAULT_CORNER_MARGIN;
+    SP<Config::Values::Int> m_cornerMarginValue;
+    int                    m_cornerMargin = DEFAULT_CORNER_MARGIN;
 
     bool m_active = true;
 

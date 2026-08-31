@@ -180,6 +180,21 @@ static std::array<EdgeSide, 2> edgeCorners(EdgeSide s) {
   }
 }
 
+namespace {
+// Config::Values::IValue stores its name as a bare const char*, it does not
+// copy. These backing strings must therefore outlive the value objects, so
+// they live at namespace scope in a fixed array (never reallocates, unlike a
+// vector, whose SSO buffers would move and dangle the stored pointers).
+constexpr int                                     FIELDS_PER_SLOT = 7;
+std::array<std::string, MAX_EDGE_SLOTS * FIELDS_PER_SLOT> g_configNames;
+
+const char* configName(int slot, int field, const char* suffix) {
+  auto& s = g_configNames[slot * FIELDS_PER_SLOT + field];
+  s       = std::string("plugin:hot-edge:") + EDGE_SLOT_NAMES[slot] + ":" + suffix;
+  return s.c_str();
+}
+} // namespace
+
 // ---------------------------------------------------------------------------
 // Lua config API: hl.plugin.hyprhotedge.*
 //
@@ -323,28 +338,97 @@ int CHotEdge::luaSetCornerMargin(lua_State *L) {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Legacy hyprlang config: plugin:hot-edge:edgeN:* keywords.
+//
+// addConfigValueV2() is supported by BOTH Hyprland 0.56 config managers, so
+// these keep working for hyprland.conf users. Under the Lua config manager
+// the values are additionally wrapped and exposed through hl.config.values,
+// but they are simply never set unless something writes them. Either way the
+// SPs below are the single source of truth — we never look values up by name
+// (getConfigValue) because that returns nullptr under the Lua manager.
+// ---------------------------------------------------------------------------
+
+void CHotEdge::registerConfigValues() {
+  for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
+    auto& v = m_configValues[i];
+
+    v.enabled          = makeShared<Config::Values::Int>(configName(i, 0, "enabled"), "Enable this hot edge", 0);
+    v.side             = makeShared<Config::Values::String>(configName(i, 1, "side"), "Screen edge: left, right, top or bottom", "right");
+    v.triggerWidth     = makeShared<Config::Values::Int>(configName(i, 2, "trigger_width"), "Width of the trigger zone, in px", 15);
+    v.dwellTime        = makeShared<Config::Values::Int>(configName(i, 3, "dwell_time"), "Time to dwell in the zone before triggering, in ms", 150);
+    v.specialWorkspace = makeShared<Config::Values::String>(configName(i, 4, "special_workspace"), "Name of the special workspace to toggle", "");
+    v.targetMonitor    = makeShared<Config::Values::String>(configName(i, 5, "target_monitor"), "Monitor name, or * for all monitors", "*");
+    v.hideOnLeave      = makeShared<Config::Values::Int>(configName(i, 6, "hide_on_leave"), "Auto-hide when the cursor leaves the panel area", 1);
+
+    for (const auto& val : std::initializer_list<SP<Config::Values::IValue>>{v.enabled, v.side, v.triggerWidth, v.dwellTime, v.specialWorkspace, v.targetMonitor, v.hideOnLeave}) {
+      if (!HyprlandAPI::addConfigValueV2(PHANDLE, val))
+        Log::logger->log(Log::ERR, "[HotEdge] Failed to register config value {}", val->name());
+    }
+  }
+
+  // Global, so it needs no entry in g_configNames — a string literal already
+  // has the static storage duration IValue's bare const char* name requires.
+  m_cornerMarginValue = makeShared<Config::Values::Int>("plugin:hot-edge:corner_margin", "Gap in px between a corner zone and the edges either side of it", DEFAULT_CORNER_MARGIN);
+  if (!HyprlandAPI::addConfigValueV2(PHANDLE, m_cornerMarginValue))
+    Log::logger->log(Log::ERR, "[HotEdge] Failed to register config value corner_margin");
+}
+
 void CHotEdge::reloadConfig() {
   // Negative would push edges back over the corner they are meant to avoid.
-  m_cornerMargin =
-      std::max(0, m_cornerMarginSetting.value_or(DEFAULT_CORNER_MARGIN));
+  // Precedence: Lua set_corner_margin() > legacy corner_margin keyword > default.
+  if (m_cornerMarginSetting.has_value())
+    m_cornerMargin = std::max(0, *m_cornerMarginSetting);
+  else if (m_cornerMarginValue)
+    m_cornerMargin = std::max<int>(0, m_cornerMarginValue->value());
+  else
+    m_cornerMargin = DEFAULT_CORNER_MARGIN;
 
-  // Rebuild the fixed slots from the definitions collected by the Lua
-  // config. Definitions past the slot limit are already rejected at parse
-  // time, but guard here as well in case the limit ever moves.
+  // Rebuild the fixed slots from both config sources. Lua add_edge()
+  // definitions win slot-by-slot (they are the current API and re-run from
+  // scratch on every reload); legacy plugin:hot-edge:edgeN:* keywords fill
+  // the slots Lua did not claim. A slot neither source provides is disabled.
   for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
-    if (i >= static_cast<int>(m_definitions.size())) {
+    if (i < static_cast<int>(m_definitions.size())) {
+      const auto &d = m_definitions[i];
+      m_edges[i].enabled = d.enabled;
+      m_edges[i].side = parseSide(d.side);
+      m_edges[i].triggerWidth = std::max(0, d.triggerWidth);
+      m_edges[i].dwellTime = std::max(0, d.dwellTime);
+      m_edges[i].specialWorkspace = d.specialWorkspace;
+      m_edges[i].targetMonitor = d.targetMonitor.empty() ? "*" : d.targetMonitor;
+      m_edges[i].hideOnLeave = d.hideOnLeave;
+      continue;
+    }
+
+    const auto &v = m_configValues[i];
+
+    // registerConfigValues() has not run (or failed) — keep the struct
+    // defaults rather than dereferencing anything.
+    if (!v.enabled || !v.side || !v.triggerWidth || !v.dwellTime || !v.specialWorkspace || !v.targetMonitor || !v.hideOnLeave) {
       m_edges[i].enabled = false;
       continue;
     }
 
-    const auto &d = m_definitions[i];
-    m_edges[i].enabled = d.enabled;
-    m_edges[i].side = parseSide(d.side);
-    m_edges[i].triggerWidth = std::max(0, d.triggerWidth);
-    m_edges[i].dwellTime = std::max(0, d.dwellTime);
-    m_edges[i].specialWorkspace = d.specialWorkspace;
-    m_edges[i].targetMonitor = d.targetMonitor.empty() ? "*" : d.targetMonitor;
-    m_edges[i].hideOnLeave = d.hideOnLeave;
+    m_edges[i].enabled = v.enabled->value() != 0;
+    m_edges[i].side = parseSide(v.side->value());
+    m_edges[i].triggerWidth = v.triggerWidth->value();
+    m_edges[i].dwellTime = v.dwellTime->value();
+    m_edges[i].specialWorkspace = v.specialWorkspace->value();
+    m_edges[i].targetMonitor = v.targetMonitor->value();
+    m_edges[i].hideOnLeave = v.hideOnLeave->value() != 0;
+
+    // Default to "*" (all monitors) if not specified
+    if (m_edges[i].targetMonitor.empty())
+      m_edges[i].targetMonitor = "*";
+  }
+
+  for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
+    if (m_edges[i].enabled) {
+      Log::logger->log(Log::DEBUG, "[HotEdge] Slot {} enabled: side={}, trigger={}px, dwell={}ms, workspace={}, monitor={}",
+                       EDGE_SLOT_NAMES[i], SIDE_NAMES[static_cast<int>(m_edges[i].side)], m_edges[i].triggerWidth, m_edges[i].dwellTime,
+                       m_edges[i].specialWorkspace, m_edges[i].targetMonitor);
+    }
   }
 }
 

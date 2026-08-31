@@ -25,6 +25,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // Create the HotEdge instance BEFORE registering callbacks
     g_pHotEdge = std::make_unique<CHotEdge>();
 
+    // Register the legacy hyprlang config values (plugin:hot-edge:*) first, so
+    // they exist before the queued reload at the end of this function fires
+    // config.reloaded and reloadConfig() reads them. addConfigValueV2 is
+    // accepted by both the hyprlang and the Lua config manager, so this is a
+    // no-op-ish path under hyprland.lua and the real one under hyprland.conf.
+    // The values are owned by the plugin (SPs in m_configValues) — never
+    // looked up by name — which is what avoids the 0.56 name-lookup SIGSEGV.
+    g_pHotEdge->registerConfigValues();
+
     // Configuration is collected from the Lua config via
     // hl.plugin.hyprhotedge.add_edge() / set_corner_margin(). These run while
     // Hyprland evaluates hyprland.lua, so the listeners must exist before the
@@ -54,7 +63,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     Log::logger->log(Log::INFO, "[HotEdge] Registered callbacks");
     Log::logger->log(Log::INFO, "[HotEdge] Plugin loaded successfully!");
 
-    return {"hypr-hot-edge", "Hot edge trigger for special workspace overlays (supports multiple edges per monitor)", "claychinasky", "0.5.0"};
+    return {"hypr-hot-edge", "Hot edge trigger for special workspace overlays (supports multiple edges per monitor)", "claychinasky", "0.6.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {

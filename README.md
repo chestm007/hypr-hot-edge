@@ -54,7 +54,67 @@ hyprctl getoption plugin:hot-edge:edge9:enabled   # "no such option" => stale im
 
 ## Configuration
 
-Add to your `hyprland.conf`:
+The plugin supports **two config paths** that can be used independently or
+together:
+
+- **Lua API** (`hl.plugin.hyprhotedge.*` in `hyprland.lua`) — the current
+  interface.
+- **Legacy keywords** (`plugin:hot-edge:*` in `hyprland.conf`) — the original
+  interface, kept for backward compatibility.
+
+Both work under Hyprland 0.56. Which one is actually *used* depends on your
+main config file: `hyprland.lua` → the Lua manager (hyprland.conf keywords are
+ignored), `hyprland.conf` → the legacy hyprlang manager (the Lua functions are
+unavailable). If you use both managers' sources at once (a `.conf` alongside a
+`.lua` that loads the plugin), Lua `add_edge` definitions win slot-by-slot and
+the legacy keywords fill the slots Lua did not claim.
+
+### Lua config (recommended)
+
+In `hyprland.lua`:
+
+```lua
+-- Load the plugin (or `plugin = /path/to/hypr-hot-edge.so` in hyprland.conf)
+--
+-- hl.plugin.hyprhotedge.add_edge takes:
+--   side             required: left/right/top/bottom/topleft/topright/bottomleft/bottomright
+--   special_workspace required: name of the special workspace to toggle
+--   trigger_width    px from the screen edge that arms the trigger (default 15, 0-512)
+--   dwell_time       ms in the zone before the panel opens (default 150)
+--   target_monitor   monitor name or "*" for all (default "*")
+--   hide_on_leave    close when the cursor leaves the panel area (default true)
+--   enabled          keep the slot but disabled (default true)
+
+hl.plugin.hyprhotedge.add_edge({
+    side = "right",
+    trigger_width = 15,
+    dwell_time = 150,
+    special_workspace = "hotedge-right-mon1",
+    target_monitor = "HDMI-A-1",
+    hide_on_leave = true,
+})
+
+hl.plugin.hyprhotedge.add_edge({
+    side = "topright",
+    trigger_width = 15,
+    dwell_time = 150,
+    special_workspace = "hotedge-topright-mon1",
+})
+
+-- Gap in px between a corner zone and the edges either side of it.
+-- Global. (default 10)
+hl.plugin.hyprhotedge.set_corner_margin(10)
+```
+
+Up to 16 edges. Corners work the same way; the trigger zone is a
+`trigger_width x trigger_width` square in the corner, and enabling a corner
+shrinks the two neighbouring edges on the same monitor by
+`trigger_width + corner_margin`, leaving a gap where neither fires.
+
+### Legacy hyprlang config
+
+If you use a `hyprland.conf`, the original `plugin:hot-edge:` keywords still
+work exactly as before:
 
 ```conf
 # Load the plugin
@@ -213,17 +273,23 @@ decoration {
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `enabled` | int | 0 | Enable this edge slot (0 or 1) |
+| `enabled` | int (lua: bool) | 0 (lua: true) | Enable this edge slot (0 or 1) |
 | `side` | string | "right" | Zone: `left`, `right`, `top`, `bottom`, `topleft`, `topright`, `bottomleft`, `bottomright` |
 | `trigger_width` | int | 15 | Pixel width of the trigger zone; for a corner this is the side of its square, and it also sets how much of the neighbouring edges the corner reserves |
 | `dwell_time` | int | 150 | Milliseconds to wait in the zone before triggering. `0` = fire the moment the zone is entered. Ignored when you hit the absolute edge/corner pixel, which is always instant |
-| `special_workspace` | string | "" | Name of the special workspace to toggle |
+| `special_workspace` | string | "" | Name of the special workspace to toggle (required in the Lua API) |
 | `target_monitor` | string | "*" | Monitor name or "*" for all monitors |
-| `hide_on_leave` | int | 1 | Auto-hide once the cursor leaves the panel area. Set `0` for a panel whose real size does not match the 1/3-of-screen rectangle the plugin assumes -- a fullscreen workspace above all. It then closes only on focus loss, monitor change, another panel taking over, or a dispatcher |
+| `hide_on_leave` | int (lua: bool) | 1 (lua: true) | Auto-hide once the cursor leaves the panel area. Set `0` for a panel whose real size does not match the 1/3-of-screen rectangle the plugin assumes -- a fullscreen workspace above all. It then closes only on focus loss, monitor change, another panel taking over, or a dispatcher |
+
+The Lua API takes the same fields (`hide_on_leave`/`enabled` as booleans, and
+`special_workspace` is required). In the Lua config the legacy `enabled = 0`
+default does not apply — a slot that is not added simply does not exist.
 
 ### Global Options
 
-Set directly under `hot-edge`, not inside a slot:
+`corner_margin` — set directly under `hot-edge` in the hyprlang config, or
+with `hl.plugin.hyprhotedge.set_corner_margin()` in the Lua config (the Lua
+call wins when both are present):
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
@@ -361,9 +427,14 @@ into the corner.
 ### Config change had no effect
 `hyprctl keyword plugin:hot-edge:...` updates Hyprland's registry but does **not**
 reach the plugin -- it reads its values on the config-reloaded event, which
-`keyword` does not raise. Edit `hyprland.conf` and run `hyprctl reload` instead.
-`hyprctl getoption` will happily show the new value either way, so it is not a
-reliable check that the setting is live.
+`keyword` does not raise. Edit your config (`hyprland.lua` or `hyprland.conf`)
+and run `hyprctl reload` instead. `hyprctl getoption` will happily show the new
+value either way, so it is not a reliable check that the setting is live.
+
+Under the Lua config manager the legacy `plugin:hot-edge:*` keywords are not
+read from `hyprland.conf` at all (the conf file is not parsed); configure with
+`hl.plugin.hyprhotedge.add_edge()` in `hyprland.lua`. Conversely, the Lua
+functions do not exist under the legacy hyprlang manager.
 
 ### Corner feels slow
 Only the exact corner pixel bypasses `dwell_time`. Set `dwell_time = 0` on the
