@@ -6,11 +6,12 @@
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/helpers/signal/Signal.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
-#include <hyprland/src/config/values/ConfigValues.hpp>
 
 #include <string>
 #include <chrono>
 #include <array>
+#include <vector>
+#include <optional>
 
 enum class EdgeSide {
     LEFT = 0,
@@ -40,7 +41,7 @@ inline bool isCornerSide(EdgeSide s) {
 // both neighbouring edges, leaving a gap the edges never trigger in. The gap is
 // exactly this value: the edge is inset by trigger_width + margin, and the
 // corner occupies the trigger_width part of it.
-// Overridable with the single global plugin:hyprhotedge:corner_margin.
+// Overridable with hl.plugin.hyprhotedge.set_corner_margin().
 constexpr int DEFAULT_CORNER_MARGIN = 10;
 
 struct EdgeConfig {
@@ -57,18 +58,18 @@ struct EdgeConfig {
     bool hideOnLeave = true;
 };
 
-// Handles returned by addConfigValueV2. Hyprland 0.56 deprecated the
-// name-lookup API (getConfigValue), which returns nullptr under the Lua config
-// manager — dereferencing that is what SIGSEGV'd the compositor. Holding the
-// value objects instead removes the lookup, so there is nothing to be null.
-struct EdgeConfigValues {
-    SP<Config::Values::Int>    enabled;
-    SP<Config::Values::String> side;
-    SP<Config::Values::Int>    triggerWidth;
-    SP<Config::Values::Int>    dwellTime;
-    SP<Config::Values::String> specialWorkspace;
-    SP<Config::Values::String> targetMonitor;
-    SP<Config::Values::Int>    hideOnLeave;
+// One edge definition collected from the Lua config, via
+// hl.plugin.hyprhotedge.add_edge(). The Lua config re-executes on every
+// reload, and preReload clears the list first, so the vector always rebuilds
+// from scratch instead of accumulating.
+struct EdgeDefinition {
+    bool enabled = true;
+    std::string side = "right";
+    int triggerWidth = 15;
+    int dwellTime = 150;
+    std::string specialWorkspace;
+    std::string targetMonitor = "*";
+    bool hideOnLeave = true;
 };
 
 struct EdgeState {
@@ -91,8 +92,6 @@ public:
     CHotEdge();
     ~CHotEdge();
 
-    void init();
-    void registerConfigValues();   // must run inside pluginInit, before init()
     void registerCallbacks();
     void onTick();
     void onActiveWindowChange(PHLWINDOW pWindow);
@@ -108,6 +107,11 @@ public:
     static SDispatchResult dispatchEnable(std::string args);
     static SDispatchResult dispatchDisable(std::string args);
     static SDispatchResult dispatchToggleActive(std::string args);
+
+    // Lua config API (hl.plugin.hyprhotedge.*). Called from the Lua config
+    // context by Hyprland itself, on the main thread.
+    static int luaAddEdge(lua_State* L);
+    static int luaSetCornerMargin(lua_State* L);
 
     // Configuration
     void reloadConfig();
@@ -142,13 +146,18 @@ private:
 
     std::array<EdgeConfig, MAX_EDGE_SLOTS> m_edges;
     std::array<EdgeState, MAX_EDGE_SLOTS> m_states;
-    std::array<EdgeConfigValues, MAX_EDGE_SLOTS> m_configValues;
+
+    // Collected by hl.plugin.hyprhotedge.add_edge() during config evaluation.
+    // Cleared on preReload, so a reload re-runs the Lua config from scratch
+    // and the next reloaded event rebuilds m_edges from this list.
+    std::vector<EdgeDefinition> m_definitions;
 
     // Single global, not per-slot: it is a feel setting for how far edges keep
     // clear of corners, and a different value per edge would just make the
-    // layout inconsistent.
-    SP<Config::Values::Int> m_cornerMarginValue;
-    int                     m_cornerMargin = DEFAULT_CORNER_MARGIN;
+    // layout inconsistent. Optional until set_corner_margin is called;
+    // reloadConfig() applies DEFAULT_CORNER_MARGIN when it is still absent.
+    std::optional<int> m_cornerMarginSetting;
+    int                m_cornerMargin = DEFAULT_CORNER_MARGIN;
 
     bool m_active = true;
 
@@ -163,6 +172,7 @@ private:
     // pattern that prevented clean plugin unload/reload.
     CHyprSignalListener m_mouseMoveCb;
     CHyprSignalListener m_activeWindowCb;
+    CHyprSignalListener m_configPreReloadCb;
     CHyprSignalListener m_configReloadedCb;
     CHyprSignalListener m_monitorRemovedCb;
 };

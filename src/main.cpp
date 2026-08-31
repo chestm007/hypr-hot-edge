@@ -25,15 +25,18 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // Create the HotEdge instance BEFORE registering callbacks
     g_pHotEdge = std::make_unique<CHotEdge>();
 
-    // Config values must be registered inside pluginInit, and before init()
-    // reads them. They are owned by the plugin now (addConfigValueV2), replacing
-    // the deprecated addConfigValue/getConfigValue name-lookup pair.
-    g_pHotEdge->registerConfigValues();
-    g_pHotEdge->init();
+    // Configuration is collected from the Lua config via
+    // hl.plugin.hyprhotedge.add_edge() / set_corner_margin(). These run while
+    // Hyprland evaluates hyprland.lua, so the listeners must exist before the
+    // first config pass reaches this plugin. Callbacks are removed from the
+    // hl.plugin namespace automatically on plugin unload.
+    if (!HyprlandAPI::addLuaFunction(PHANDLE, "hyprhotedge", "add_edge", CHotEdge::luaAddEdge))
+        Log::logger->log(Log::ERR, "[HotEdge] Failed to register add_edge Lua function");
+    if (!HyprlandAPI::addLuaFunction(PHANDLE, "hyprhotedge", "set_corner_margin", CHotEdge::luaSetCornerMargin))
+        Log::logger->log(Log::ERR, "[HotEdge] Failed to register set_corner_margin Lua function");
 
     // Register event listeners as members on g_pHotEdge so they unregister
-    // automatically in PLUGIN_EXIT when the instance is destroyed. This replaces
-    // the previous static-local pattern, which prevented clean plugin reload.
+    // automatically in PLUGIN_EXIT when the instance is destroyed.
     //
     // Note: previously listened on render.pre as well, but calling dispatchers
     // (togglespecialworkspace) from inside render preparation races with
@@ -41,10 +44,17 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // mouse.move alone is enough for edge detection.
     g_pHotEdge->registerCallbacks();
 
+    // Hyprland only loads plugins declared in the config from a reload it
+    // queues itself (see CPluginSystem), which re-runs the Lua config, so the
+    // first pass already sees hl.plugin.hyprhotedge.*. Queue a reload too, to
+    // pick up definitions no matter which load path (hyprctl plugin load vs
+    // config) this plugin came in through.
+    HyprlandAPI::reloadConfig();
+
     Log::logger->log(Log::INFO, "[HotEdge] Registered callbacks");
     Log::logger->log(Log::INFO, "[HotEdge] Plugin loaded successfully!");
 
-    return {"hypr-hot-edge", "Hot edge trigger for special workspace overlays (supports multiple edges per monitor)", "claychinasky", "0.4.0"};
+    return {"hypr-hot-edge", "Hot edge trigger for special workspace overlays (supports multiple edges per monitor)", "claychinasky", "0.5.0"};
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
