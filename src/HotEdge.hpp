@@ -1,96 +1,22 @@
 #pragma once
 
+#include "EdgeConfig.hpp"
+
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/managers/KeybindManager.hpp>
 #include <hyprland/src/helpers/signal/Signal.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
-#include <hyprland/src/config/values/ConfigValues.hpp>
 
 #include <string>
 #include <chrono>
 #include <array>
 #include <vector>
 #include <optional>
+#include <memory>
 
-enum class EdgeSide {
-    LEFT = 0,
-    RIGHT = 1,
-    TOP = 2,
-    BOTTOM = 3,
-    TOP_LEFT = 4,
-    TOP_RIGHT = 5,
-    BOTTOM_LEFT = 6,
-    BOTTOM_RIGHT = 7
-};
-
-// Support up to 16 configurations (8 zones — 4 edges + 4 corners — × 2 monitors)
-constexpr int MAX_EDGE_SLOTS = 16;
-constexpr const char* EDGE_SLOT_NAMES[] = {"edge1", "edge2", "edge3", "edge4", "edge5", "edge6", "edge7", "edge8",
-                                           "edge9", "edge10", "edge11", "edge12", "edge13", "edge14", "edge15", "edge16"};
-constexpr const char* SIDE_NAMES[] = {"left", "right", "top", "bottom",
-                                      "topleft", "topright", "bottomleft", "bottomright"};
-
-inline bool isCornerSide(EdgeSide s) {
-    return s >= EdgeSide::TOP_LEFT;
-}
-
-// A corner zone would otherwise sit inside both of its composing edge zones, so
-// sliding toward the corner clips the edge first and opens the wrong panel.
-// Each configured corner instead carves its own width plus this margin out of
-// both neighbouring edges, leaving a gap the edges never trigger in. The gap is
-// exactly this value: the edge is inset by trigger_width + margin, and the
-// corner occupies the trigger_width part of it.
-// Overridable via hl.plugin.hyprhotedge.set_corner_margin() (Lua) or the
-// legacy plugin:hot-edge:corner_margin keyword (hyprland.conf).
-constexpr int DEFAULT_CORNER_MARGIN = 10;
-
-struct EdgeConfig {
-    EdgeSide side = EdgeSide::RIGHT;
-    int triggerWidth = 15;          // pixels from edge to trigger
-    int dwellTime = 150;            // ms to wait before triggering
-    std::string specialWorkspace;   // name of special workspace to show
-    std::string targetMonitor;      // monitor name ("*" = all, "DP-1" = specific)
-    bool enabled = false;
-    // Auto-hide once the cursor leaves the panel rectangle. Turn off for a
-    // panel whose real size does not match getPanelArea()'s 1/3 assumption --
-    // a fullscreen workspace, most obviously, which would otherwise close as
-    // soon as the cursor left the corner quadrant it never occupied.
-    bool hideOnLeave = true;
-};
-
-// One edge definition collected from the Lua config, via
-// hl.plugin.hyprhotedge.add_edge(). The Lua config re-executes on every
-// reload, and preReload clears the list first, so the vector always rebuilds
-// from scratch instead of accumulating.
-struct EdgeDefinition {
-    bool enabled = true;
-    std::string side = "right";
-    int triggerWidth = 15;
-    int dwellTime = 150;
-    std::string specialWorkspace;
-    std::string targetMonitor = "*";
-    bool hideOnLeave = true;
-};
-
-// Handles returned by addConfigValueV2 for the legacy hyprlang config
-// (plugin:hot-edge:* keywords in hyprland.conf). Hyprland 0.56 deprecated the
-// name-lookup API (getConfigValue), which returns nullptr under the Lua config
-// manager — dereferencing that is what SIGSEGV'd the compositor. Holding the
-// value objects instead removes the lookup, so there is nothing to be null.
-// These coexist with the Lua definitions: on a reload, Lua add_edge() entries
-// win slot-by-slot and legacy keywords fill the remaining slots, so the two
-// paths can be used together or independently.
-struct EdgeConfigValues {
-    SP<Config::Values::Int>    enabled;
-    SP<Config::Values::String> side;
-    SP<Config::Values::Int>    triggerWidth;
-    SP<Config::Values::Int>    dwellTime;
-    SP<Config::Values::String> specialWorkspace;
-    SP<Config::Values::String> targetMonitor;
-    SP<Config::Values::Int>    hideOnLeave;
-};
+class LegacyConfig;
 
 struct EdgeState {
     bool bCursorInZone = false;
@@ -133,13 +59,10 @@ public:
     static int luaAddEdge(lua_State* L);
     static int luaSetCornerMargin(lua_State* L);
 
-    // Legacy hyprlang config (plugin:hot-edge:* keywords in hyprland.conf).
-    // Must run inside pluginInit, before any reloadConfig() reads the values.
-    // The value objects are held as SPs (see EdgeConfigValues) rather than
-    // looked up by name — the deprecated getConfigValue() name lookup returns
-    // nullptr under the Lua config manager and dereferencing it SIGSEGV'd the
-    // compositor.
-    void registerConfigValues();
+    // Temporary compatibility path for plugin:hot-edge:* values. Kept behind
+    // one adapter so removing hyprlang support does not disturb Lua parsing or
+    // runtime edge handling.
+    void registerLegacyConfig();
 
     // Configuration
     void reloadConfig();
@@ -167,34 +90,26 @@ private:
     std::pair<double, double> cornerInsets(PHLMONITOR monitor, EdgeSide side);
 
     static int parseEdgeArg(const std::string& arg);
-    static EdgeSide parseSide(const std::string& str);
-
     bool hasPendingState() const;
     void armPendingTimer();
 
     std::array<EdgeConfig, MAX_EDGE_SLOTS> m_edges;
     std::array<EdgeState, MAX_EDGE_SLOTS> m_states;
 
-    // Collected by hl.plugin.hyprhotedge.add_edge() during config evaluation.
-    // Cleared on preReload, so a reload re-runs the Lua config from scratch
-    // and the next reloaded event rebuilds m_edges from this list.
-    std::vector<EdgeDefinition> m_definitions;
+    // Canonical edges collected from hl.plugin.hyprhotedge.add_edge(). Cleared
+    // before Lua re-executes and copied directly into m_edges after reload.
+    std::vector<EdgeConfig> m_luaEdges;
 
-    // Legacy hyprlang config value handles (plugin:hot-edge:edgeN:*,
-    // plugin:hot-edge:corner_margin). Populated by registerConfigValues();
-    // every slot's set is either fully present or fully absent, which lets
-    // reloadConfig() tell "legacy keyword registered" from "registration
-    // failed" without a name lookup.
-    std::array<EdgeConfigValues, MAX_EDGE_SLOTS> m_configValues;
+    // All hyprlang-specific value storage and conversion lives in this
+    // temporary adapter. See docs/legacy-config-removal.md.
+    std::unique_ptr<LegacyConfig> m_legacyConfig;
 
     // Single global, not per-slot: it is a feel setting for how far edges keep
     // clear of corners, and a different value per edge would just make the
-    // layout inconsistent. The Lua set_corner_margin() takes precedence when
-    // called; otherwise the legacy corner_margin keyword is used, and the
-    // compiled default when neither source set anything.
+    // layout inconsistent. Lua takes precedence over the temporary legacy
+    // adapter; the compiled default applies when neither source sets it.
     std::optional<int> m_cornerMarginSetting;
-    SP<Config::Values::Int> m_cornerMarginValue;
-    int                    m_cornerMargin = DEFAULT_CORNER_MARGIN;
+    int m_cornerMargin = DEFAULT_CORNER_MARGIN;
 
     bool m_active = true;
 

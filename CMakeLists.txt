@@ -23,6 +23,8 @@ pkg_check_modules(DEPS REQUIRED
 add_library(hypr-hot-edge SHARED
     src/main.cpp
     src/HotEdge.cpp
+    src/HotEdgeConfig.cpp
+    src/LegacyConfig.cpp
 )
 
 target_include_directories(hypr-hot-edge PRIVATE

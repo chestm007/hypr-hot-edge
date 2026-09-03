@@ -1,24 +1,15 @@
 #include "HotEdge.hpp"
+#include "LegacyConfig.hpp"
 #include "globals.hpp"
 
-#include <hyprland/src/config/lua/bindings/LuaBindingsInternal.hpp>
-#include <hyprland/src/config/lua/types/LuaConfigBool.hpp>
-#include <hyprland/src/config/lua/types/LuaConfigInt.hpp>
-#include <hyprland/src/config/lua/types/LuaConfigString.hpp>
 #include <hyprland/src/debug/log/Logger.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/output/Monitor.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprutils/math/Box.hpp>
-#include <hyprutils/utils/ScopeGuard.hpp>
 
 #include <algorithm>
-
-extern "C" {
-#include <lauxlib.h>
-#include <lua.h>
-}
 
 using namespace std::chrono;
 
@@ -71,7 +62,7 @@ void CHotEdge::registerCallbacks() {
       // definitions collected by the previous pass so the reloaded
       // event below rebuilds from a clean list instead of appending
       // to it.
-      g_pHotEdge->m_definitions.clear();
+      g_pHotEdge->m_luaEdges.clear();
       g_pHotEdge->m_cornerMarginSetting.reset();
     }
   });
@@ -134,35 +125,6 @@ void CHotEdge::armPendingTimer() {
   });
 }
 
-EdgeSide CHotEdge::parseSide(const std::string &str) {
-  std::string lower = str;
-  for (auto &c : lower)
-    c = std::tolower(c);
-
-  if (lower == "left" || lower == "l" || lower == "0")
-    return EdgeSide::LEFT;
-  if (lower == "right" || lower == "r" || lower == "1")
-    return EdgeSide::RIGHT;
-  if (lower == "top" || lower == "t" || lower == "2")
-    return EdgeSide::TOP;
-  if (lower == "bottom" || lower == "b" || lower == "3")
-    return EdgeSide::BOTTOM;
-  if (lower == "topleft" || lower == "top-left" || lower == "tl" ||
-      lower == "4")
-    return EdgeSide::TOP_LEFT;
-  if (lower == "topright" || lower == "top-right" || lower == "tr" ||
-      lower == "5")
-    return EdgeSide::TOP_RIGHT;
-  if (lower == "bottomleft" || lower == "bottom-left" || lower == "bl" ||
-      lower == "6")
-    return EdgeSide::BOTTOM_LEFT;
-  if (lower == "bottomright" || lower == "bottom-right" || lower == "br" ||
-      lower == "7")
-    return EdgeSide::BOTTOM_RIGHT;
-
-  return EdgeSide::RIGHT; // Default
-}
-
 // The corners sitting at each end of an edge, low end first (top for vertical
 // edges, left for horizontal ones).
 static std::array<EdgeSide, 2> edgeCorners(EdgeSide s) {
@@ -177,258 +139,6 @@ static std::array<EdgeSide, 2> edgeCorners(EdgeSide s) {
     return {EdgeSide::BOTTOM_LEFT, EdgeSide::BOTTOM_RIGHT};
   default:
     return {s, s};
-  }
-}
-
-namespace {
-// Config::Values::IValue stores its name as a bare const char*, it does not
-// copy. These backing strings must therefore outlive the value objects, so
-// they live at namespace scope in a fixed array (never reallocates, unlike a
-// vector, whose SSO buffers would move and dangle the stored pointers).
-constexpr int                                     FIELDS_PER_SLOT = 7;
-std::array<std::string, MAX_EDGE_SLOTS * FIELDS_PER_SLOT> g_configNames;
-
-const char* configName(int slot, int field, const char* suffix) {
-  auto& s = g_configNames[slot * FIELDS_PER_SLOT + field];
-  s       = std::string("plugin:hot-edge:") + EDGE_SLOT_NAMES[slot] + ":" + suffix;
-  return s.c_str();
-}
-} // namespace
-
-// ---------------------------------------------------------------------------
-// Lua config API: hl.plugin.hyprhotedge.*
-//
-// These run in the Lua config context (Hyprland executes hyprland.lua on the
-// main thread). On every reload the config re-runs from scratch and
-// preReload has cleared m_definitions first, so add_edge() appends to a clean
-// list and the reloaded event rebuilds m_edges from it.
-// ---------------------------------------------------------------------------
-
-// Read and parse a single table field, hyprbars-style. Each field gets its own
-// scope: lua_getfield pushes exactly one slot (the value, or nil when the key
-// is absent), and the CScopeGuard pops exactly that one slot at block end.
-// parse() reads the top of the stack without popping it, so the guard keeps
-// the stack balanced whether or not the key was present. On a parse error the
-// function early-returns; the guard still pops first, and the error
-// propagates out to Hyprland as a config error.
-//   present -> out is set to the parsed value
-//   absent  -> out keeps its default
-static int parseIntField(lua_State *L, int tableIdx, const char *key, int def,
-                         int min, int max, int &out) {
-  Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
-  lua_getfield(L, tableIdx, key);
-  if (!lua_isnil(L, -1)) {
-    Config::Lua::CLuaConfigInt parser(def, min, max);
-    const auto err = parser.parse(L);
-    if (err.errorCode != Config::Lua::PARSE_ERROR_OK)
-      return Config::Lua::Bindings::Internal::configError(L, "add_edge: {}: {}",
-                                                          key, err.message);
-    out = parser.parsed();
-  }
-  return 0;
-}
-
-static int parseStrField(lua_State *L, int tableIdx, const char *key,
-                         const std::string &def, std::string &out) {
-  Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
-  lua_getfield(L, tableIdx, key);
-  if (!lua_isnil(L, -1)) {
-    Config::Lua::CLuaConfigString parser(def);
-    const auto err = parser.parse(L);
-    if (err.errorCode != Config::Lua::PARSE_ERROR_OK)
-      return Config::Lua::Bindings::Internal::configError(L, "add_edge: {}: {}",
-                                                          key, err.message);
-    out = parser.parsed();
-  }
-  return 0;
-}
-
-static int parseBoolField(lua_State *L, int tableIdx, const char *key,
-                          bool def, bool &out) {
-  Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
-  lua_getfield(L, tableIdx, key);
-  if (!lua_isnil(L, -1)) {
-    Config::Lua::CLuaConfigBool parser(def);
-    const auto err = parser.parse(L);
-    if (err.errorCode != Config::Lua::PARSE_ERROR_OK)
-      return Config::Lua::Bindings::Internal::configError(L, "add_edge: {}: {}",
-                                                          key, err.message);
-    out = parser.parsed();
-  }
-  return 0;
-}
-
-int CHotEdge::luaAddEdge(lua_State *L) {
-  if (!g_pHotEdge)
-    return Config::Lua::Bindings::Internal::configError(
-        L, "add_edge: plugin not initialized");
-
-  if (!lua_istable(L, 1))
-    return Config::Lua::Bindings::Internal::configError(
-        L,
-        "add_edge: expected a table { side, special_workspace, trigger_width, "
-        "dwell_time, target_monitor, hide_on_leave, enabled }");
-
-  const int tableIdx = lua_absindex(L, 1);
-
-  if (g_pHotEdge->m_definitions.size() >= MAX_EDGE_SLOTS)
-    return Config::Lua::Bindings::Internal::configError(
-        L, "add_edge: maximum of {} edges reached", MAX_EDGE_SLOTS);
-
-  EdgeDefinition def;
-
-  {
-    Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
-    lua_getfield(L, tableIdx, "side");
-    if (lua_isnil(L, -1) || !lua_isstring(L, -1))
-      return Config::Lua::Bindings::Internal::configError(
-          L, "add_edge: side must be a string (left, right, top, bottom, "
-             "topleft, topright, bottomleft, bottomright)");
-    def.side = lua_tostring(L, -1);
-  }
-
-  {
-    Hyprutils::Utils::CScopeGuard x([L] { lua_pop(L, 1); });
-    lua_getfield(L, tableIdx, "special_workspace");
-    if (lua_isnil(L, -1) || !lua_isstring(L, -1))
-      return Config::Lua::Bindings::Internal::configError(
-          L, "add_edge: special_workspace is required and must be a string");
-    def.specialWorkspace = lua_tostring(L, -1);
-  }
-
-  if (int rc = parseIntField(L, tableIdx, "trigger_width", 15, 0, 512,
-                             def.triggerWidth);
-      rc)
-    return rc;
-  if (int rc = parseIntField(L, tableIdx, "dwell_time", 150, 0, 60000,
-                             def.dwellTime);
-      rc)
-    return rc;
-  if (int rc = parseStrField(L, tableIdx, "target_monitor", "*",
-                             def.targetMonitor);
-      rc)
-    return rc;
-  if (int rc = parseBoolField(L, tableIdx, "hide_on_leave", true,
-                              def.hideOnLeave);
-      rc)
-    return rc;
-  if (int rc = parseBoolField(L, tableIdx, "enabled", true, def.enabled); rc)
-    return rc;
-
-  if (def.targetMonitor.empty())
-    def.targetMonitor = "*";
-
-  g_pHotEdge->m_definitions.push_back(std::move(def));
-  return 0;
-}
-
-int CHotEdge::luaSetCornerMargin(lua_State *L) {
-  if (!g_pHotEdge)
-    return Config::Lua::Bindings::Internal::configError(
-        L, "set_corner_margin: plugin not initialized");
-
-  auto p = std::make_unique<Config::Lua::CLuaConfigInt>(DEFAULT_CORNER_MARGIN,
-                                                        0, 10000);
-  auto e = p->parse(L);
-  if (e.errorCode != Config::Lua::PARSE_ERROR_OK)
-    return Config::Lua::Bindings::Internal::configError(
-        L, "set_corner_margin: {}", e.message);
-
-  g_pHotEdge->m_cornerMarginSetting = p->parsed();
-  return 0;
-}
-
-// ---------------------------------------------------------------------------
-// Legacy hyprlang config: plugin:hot-edge:edgeN:* keywords.
-//
-// addConfigValueV2() is supported by BOTH Hyprland 0.56 config managers, so
-// these keep working for hyprland.conf users. Under the Lua config manager
-// the values are additionally wrapped and exposed through hl.config.values,
-// but they are simply never set unless something writes them. Either way the
-// SPs below are the single source of truth — we never look values up by name
-// (getConfigValue) because that returns nullptr under the Lua manager.
-// ---------------------------------------------------------------------------
-
-void CHotEdge::registerConfigValues() {
-  for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
-    auto& v = m_configValues[i];
-
-    v.enabled          = makeShared<Config::Values::Int>(configName(i, 0, "enabled"), "Enable this hot edge", 0);
-    v.side             = makeShared<Config::Values::String>(configName(i, 1, "side"), "Screen edge: left, right, top or bottom", "right");
-    v.triggerWidth     = makeShared<Config::Values::Int>(configName(i, 2, "trigger_width"), "Width of the trigger zone, in px", 15);
-    v.dwellTime        = makeShared<Config::Values::Int>(configName(i, 3, "dwell_time"), "Time to dwell in the zone before triggering, in ms", 150);
-    v.specialWorkspace = makeShared<Config::Values::String>(configName(i, 4, "special_workspace"), "Name of the special workspace to toggle", "");
-    v.targetMonitor    = makeShared<Config::Values::String>(configName(i, 5, "target_monitor"), "Monitor name, or * for all monitors", "*");
-    v.hideOnLeave      = makeShared<Config::Values::Int>(configName(i, 6, "hide_on_leave"), "Auto-hide when the cursor leaves the panel area", 1);
-
-    for (const auto& val : std::initializer_list<SP<Config::Values::IValue>>{v.enabled, v.side, v.triggerWidth, v.dwellTime, v.specialWorkspace, v.targetMonitor, v.hideOnLeave}) {
-      if (!HyprlandAPI::addConfigValueV2(PHANDLE, val))
-        Log::logger->log(Log::ERR, "[HotEdge] Failed to register config value {}", val->name());
-    }
-  }
-
-  // Global, so it needs no entry in g_configNames — a string literal already
-  // has the static storage duration IValue's bare const char* name requires.
-  m_cornerMarginValue = makeShared<Config::Values::Int>("plugin:hot-edge:corner_margin", "Gap in px between a corner zone and the edges either side of it", DEFAULT_CORNER_MARGIN);
-  if (!HyprlandAPI::addConfigValueV2(PHANDLE, m_cornerMarginValue))
-    Log::logger->log(Log::ERR, "[HotEdge] Failed to register config value corner_margin");
-}
-
-void CHotEdge::reloadConfig() {
-  // Negative would push edges back over the corner they are meant to avoid.
-  // Precedence: Lua set_corner_margin() > legacy corner_margin keyword > default.
-  if (m_cornerMarginSetting.has_value())
-    m_cornerMargin = std::max(0, *m_cornerMarginSetting);
-  else if (m_cornerMarginValue)
-    m_cornerMargin = std::max<int>(0, m_cornerMarginValue->value());
-  else
-    m_cornerMargin = DEFAULT_CORNER_MARGIN;
-
-  // Rebuild the fixed slots from both config sources. Lua add_edge()
-  // definitions win slot-by-slot (they are the current API and re-run from
-  // scratch on every reload); legacy plugin:hot-edge:edgeN:* keywords fill
-  // the slots Lua did not claim. A slot neither source provides is disabled.
-  for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
-    if (i < static_cast<int>(m_definitions.size())) {
-      const auto &d = m_definitions[i];
-      m_edges[i].enabled = d.enabled;
-      m_edges[i].side = parseSide(d.side);
-      m_edges[i].triggerWidth = std::max(0, d.triggerWidth);
-      m_edges[i].dwellTime = std::max(0, d.dwellTime);
-      m_edges[i].specialWorkspace = d.specialWorkspace;
-      m_edges[i].targetMonitor = d.targetMonitor.empty() ? "*" : d.targetMonitor;
-      m_edges[i].hideOnLeave = d.hideOnLeave;
-      continue;
-    }
-
-    const auto &v = m_configValues[i];
-
-    // registerConfigValues() has not run (or failed) — keep the struct
-    // defaults rather than dereferencing anything.
-    if (!v.enabled || !v.side || !v.triggerWidth || !v.dwellTime || !v.specialWorkspace || !v.targetMonitor || !v.hideOnLeave) {
-      m_edges[i].enabled = false;
-      continue;
-    }
-
-    m_edges[i].enabled = v.enabled->value() != 0;
-    m_edges[i].side = parseSide(v.side->value());
-    m_edges[i].triggerWidth = v.triggerWidth->value();
-    m_edges[i].dwellTime = v.dwellTime->value();
-    m_edges[i].specialWorkspace = v.specialWorkspace->value();
-    m_edges[i].targetMonitor = v.targetMonitor->value();
-    m_edges[i].hideOnLeave = v.hideOnLeave->value() != 0;
-
-    // Default to "*" (all monitors) if not specified
-    if (m_edges[i].targetMonitor.empty())
-      m_edges[i].targetMonitor = "*";
-  }
-
-  for (int i = 0; i < MAX_EDGE_SLOTS; i++) {
-    if (m_edges[i].enabled) {
-      Log::logger->log(Log::DEBUG, "[HotEdge] Slot {} enabled: side={}, trigger={}px, dwell={}ms, workspace={}, monitor={}",
-                       EDGE_SLOT_NAMES[i], SIDE_NAMES[static_cast<int>(m_edges[i].side)], m_edges[i].triggerWidth, m_edges[i].dwellTime,
-                       m_edges[i].specialWorkspace, m_edges[i].targetMonitor);
-    }
   }
 }
 
@@ -542,7 +252,8 @@ std::pair<double, double> CHotEdge::cornerInsets(PHLMONITOR monitor,
     if (!isEdgeEnabledForMonitor(i, monitor))
       continue;
 
-    const double claim = m_edges[i].triggerWidth + m_cornerMargin;
+    const double claim = static_cast<double>(m_edges[i].triggerWidth) +
+                         static_cast<double>(m_cornerMargin);
     if (m_edges[i].side == loCorner)
       lo = std::max(lo, claim);
     if (m_edges[i].side == hiCorner)

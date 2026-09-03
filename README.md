@@ -59,8 +59,8 @@ together:
 
 - **Lua API** (`hl.plugin.hyprhotedge.*` in `hyprland.lua`) — the current
   interface.
-- **Legacy keywords** (`plugin:hot-edge:*` in `hyprland.conf`) — the original
-  interface, kept for backward compatibility.
+- **Legacy keywords** (`plugin:hot-edge:*` in `hyprland.conf`) — deprecated;
+  retained temporarily for migration compatibility.
 
 Both work under Hyprland 0.56. Which one is actually *used* depends on your
 main config file: `hyprland.lua` → the Lua manager (hyprland.conf keywords are
@@ -112,6 +112,11 @@ shrinks the two neighbouring edges on the same monitor by
 `trigger_width + corner_margin`, leaving a gap where neither fires.
 
 ### Legacy hyprlang config
+
+> **Deprecated:** migrate these definitions to the Lua API. The compatibility
+> implementation is slated for removal; maintainers should follow
+> [the legacy removal checklist](docs/legacy-config-removal.md) when that release
+> is prepared.
 
 If you use a `hyprland.conf`, the original `plugin:hot-edge:` keywords still
 work exactly as before:
@@ -293,7 +298,7 @@ call wins when both are present):
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `corner_margin` | int | 10 | Gap in px between a corner zone and the edges either side of it. An edge is inset by that corner's `trigger_width + corner_margin`, and the corner occupies the `trigger_width` part, so the untriggerable gap is exactly `corner_margin`. Clamped at 0 |
+| `corner_margin` | int | 10 | Gap in px between a corner zone and the edges either side of it. An edge is inset by that corner's `trigger_width + corner_margin`, and the corner occupies the `trigger_width` part, so the untriggerable gap is exactly `corner_margin`. Clamped to 0–10000 |
 
 The two corner knobs do different jobs, and it is easy to reach for the wrong one:
 
